@@ -18,9 +18,24 @@ pub struct PullRequest {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PrDetail {
     pub body: String,
-    pub checks: Vec<(String, CheckResult)>,
+    pub checks: Vec<Check>,
     pub head_sha: String,
     pub comments: Vec<Comment>,
+}
+
+/// One CI check run or commit status on the PR's head.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Check {
+    pub name: String,
+    /// The Actions workflow it belongs to; empty for commit statuses.
+    pub workflow: String,
+    pub result: CheckResult,
+    /// GitHub's own word for where it is: "queued", "in progress", "failure", "success", ….
+    pub state: String,
+    /// The run's page on GitHub (Actions job or status target).
+    pub url: String,
+    pub started: String,
+    pub completed: String,
 }
 
 /// A conversation comment, a review summary, or an inline comment on a diff line.

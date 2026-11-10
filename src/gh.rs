@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::model::{
-    CheckResult, Comment, MergeMethod, MergeReadiness, PrDetail, PullRequest, ReviewKind,
+    Check, CheckResult, Comment, MergeMethod, MergeReadiness, PrDetail, PullRequest, ReviewKind,
     ReviewState,
 };
 use crate::store::Draft;
@@ -129,7 +129,7 @@ pub fn pr_detail(slug: &str, number: u64) -> Result<PrDetail> {
     comments.sort_by(|a, b| a.created.cmp(&b.created));
     Ok(PrDetail {
         body: s(&v, "body"),
-        checks: checks(&v),
+        checks: check_infos(&v),
         head_sha: s(&v, "headRefOid"),
         comments,
     })
@@ -315,6 +315,34 @@ fn checks(v: &Value) -> Vec<(String, CheckResult)> {
         .and_then(Value::as_array)
         .map(|items| items.iter().map(check_line).collect())
         .unwrap_or_default()
+}
+
+fn check_infos(v: &Value) -> Vec<Check> {
+    let items = v.get("statusCheckRollup").and_then(Value::as_array);
+    items
+        .into_iter()
+        .flatten()
+        .map(|c| {
+            let (name, result) = check_line(c);
+            let get = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            let raw = [get("conclusion"), get("state"), get("status")]
+                .into_iter()
+                .find(|x| !x.is_empty())
+                .unwrap_or_default();
+            Check {
+                name,
+                workflow: get("workflowName"),
+                result,
+                state: raw.to_lowercase().replace('_', " "),
+                url: [get("detailsUrl"), get("targetUrl")]
+                    .into_iter()
+                    .find(|x| !x.is_empty())
+                    .unwrap_or_default(),
+                started: get("startedAt"),
+                completed: get("completedAt"),
+            }
+        })
+        .collect()
 }
 
 fn check_line(v: &Value) -> (String, CheckResult) {

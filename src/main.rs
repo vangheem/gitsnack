@@ -27,7 +27,8 @@ use rune_kit::{
 };
 
 use model::{
-    Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState,
+    Check, CheckResult, Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind,
+    ReviewState,
 };
 use opencode::{Client, Entry, Snapshot};
 use store::{Draft, ModelRef, Store};
@@ -70,6 +71,7 @@ enum Panel {
 enum Confirm {
     Merge(Option<MergeReadiness>),
     Draft(bool),
+    Checks,
 }
 
 struct App {
@@ -107,6 +109,7 @@ struct App {
     add_repo: Option<TextEdit>,
     toast: Option<(String, bool)>,
     toast_until: Option<f64>,
+    next_checks_poll: f64,
     /// Comments posted from here that GitHub's reads may not return yet.
     posted: Vec<Comment>,
     next_repo_refresh: Option<f64>,
@@ -186,6 +189,7 @@ fn init() -> App {
         add_repo: None,
         toast: None,
         toast_until: None,
+        next_checks_poll: 0.0,
         posted: Vec::new(),
         next_repo_refresh: None,
     }
@@ -1016,6 +1020,22 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
         }
         _ => {}
     }
+    // While the checks dialog shows pending checks, re-read them every 15 seconds.
+    let pending = s
+        .detail
+        .as_ref()
+        .is_some_and(|d| d.checks.iter().any(|c| c.result == CheckResult::Pending));
+    if matches!(s.confirm, Some(Confirm::Checks)) && pending {
+        if now >= s.next_checks_poll {
+            if s.next_checks_poll > 0.0 {
+                s.reload_comments(Duration::ZERO);
+            }
+            s.next_checks_poll = now + 15.0;
+            tx.wake_after(Duration::from_secs(15));
+        }
+    } else {
+        s.next_checks_poll = 0.0;
+    }
     // Status messages linger a few seconds (errors longer), then go.
     if s.toast.is_some() {
         match s.toast_until {
@@ -1678,31 +1698,30 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
         meta = meta.child(Badge::new("draft").variant(BadgeVariant::Subtle).build(k));
     }
     if let Some(d) = &s.detail {
-        let fail = d
-            .checks
-            .iter()
-            .filter(|c| c.1 == model::CheckResult::Fail)
-            .count();
-        let pend = d
-            .checks
-            .iter()
-            .filter(|c| c.1 == model::CheckResult::Pending)
-            .count();
+        let count = |r: CheckResult| d.checks.iter().filter(|c| c.result == r).count();
+        let (fail, pend) = (count(CheckResult::Fail), count(CheckResult::Pending));
         if !d.checks.is_empty() {
-            let label = if fail > 0 {
-                format!("CI: {fail} failing")
+            let (label, ink) = if fail > 0 {
+                (format!("CI: {fail} failing"), k.c.danger.fg)
             } else if pend > 0 {
-                format!("CI: {pend} pending")
+                (format!("CI: {pend} pending"), k.c.warning.fg)
             } else {
-                "CI passing".into()
+                ("CI passing".to_string(), k.c.success.fg)
             };
-            meta = meta.child(text(label).font(k.ty.small).color(if fail > 0 {
-                k.c.danger.fg
-            } else if pend > 0 {
-                k.c.warning.fg
-            } else {
-                k.c.success.fg
-            }));
+            let chip = row()
+                .key("ci-status")
+                .gap(4.0)
+                .px(6.0)
+                .py(2.0)
+                .radius(4.0)
+                .items_center()
+                .cursor(rune::Cursor::Pointer)
+                .role("button")
+                .label("Show CI checks")
+                .child(text(label).font(k.ty.small_medium).color(ink))
+                .child(text("›").font(k.ty.small_medium).color(ink))
+                .on_press(|s: &mut App| s.confirm = Some(Confirm::Checks));
+            meta = meta.child(k.interactive(chip));
         }
     }
     let mut h = col()
@@ -2336,6 +2355,157 @@ fn review_panel(s: &App, k: &Kit) -> El {
         )
 }
 
+/// Seconds since the epoch for GitHub's `2026-11-10T21:57:56Z` timestamps.
+fn epoch(ts: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| ts.get(r)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0..4)?, n(5..7)?, n(8..10)?);
+    let (hh, mm, ss) = (n(11..13)?, n(14..16)?, n(17..19)?);
+    // Days from civil date (Howard Hinnant's algorithm).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+fn duration(c: &Check) -> String {
+    let (Some(a), Some(b)) = (epoch(&c.started), epoch(&c.completed)) else {
+        return String::new();
+    };
+    let secs = (b - a).max(0);
+    if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn checks_dialog(s: &App, k: &Kit, layer: &mut Vec<El>) {
+    let checks = s
+        .detail
+        .as_ref()
+        .map(|d| d.checks.as_slice())
+        .unwrap_or_default();
+    let mut order: Vec<&Check> = checks.iter().collect();
+    let rank = |c: &Check| match c.result {
+        CheckResult::Fail => 0,
+        CheckResult::Pending => 1,
+        CheckResult::Pass => 2,
+    };
+    order.sort_by(|a, b| (rank(a), &a.workflow, &a.name).cmp(&(rank(b), &b.workflow, &b.name)));
+    let count = |r: CheckResult| checks.iter().filter(|c| c.result == r).count();
+    let summary = format!(
+        "{} failing · {} pending · {} passed",
+        count(CheckResult::Fail),
+        count(CheckResult::Pending),
+        count(CheckResult::Pass)
+    );
+    let mut list = col().w_full().gap(2.0);
+    for (i, c) in order.iter().enumerate() {
+        let dot = match c.result {
+            CheckResult::Fail => k.c.danger.icon,
+            CheckResult::Pending => k.c.warning.icon,
+            CheckResult::Pass => k.c.success.icon,
+        };
+        let mut sub = vec![c.state.clone()];
+        if !c.workflow.is_empty() {
+            sub.insert(0, c.workflow.clone());
+        }
+        let took = duration(c);
+        if !took.is_empty() {
+            sub.push(took);
+        }
+        let info = col()
+            .grow(1.0)
+            .min_w(0.0)
+            .gap(2.0)
+            .child(
+                text(c.name.clone())
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_base)
+                    .truncate(),
+            )
+            .child(
+                text(sub.join(" · "))
+                    .font(k.ty.small)
+                    .color(k.c.text_muted)
+                    .truncate(),
+            );
+        let mut item = row()
+            .w_full()
+            .gap(10.0)
+            .px(10.0)
+            .py(8.0)
+            .radius(6.0)
+            .items_center()
+            .child(el().size(8.0, 8.0).radius(4.0).fill(dot))
+            .child(info);
+        if !c.url.is_empty() {
+            let url = c.url.clone();
+            item = item
+                .child(
+                    text("Open ↗")
+                        .font(k.ty.small_medium)
+                        .color(k.c.text_accent),
+                )
+                .cursor(rune::Cursor::Pointer)
+                .on_press_tx(move |_: &mut App, tx| {
+                    let _ = tx.open_url(&url);
+                });
+            item = k.interactive(item);
+        }
+        list = list.child(item.key(format!("check{i}")));
+    }
+    let body = col()
+        .w_full()
+        .gap(8.0)
+        .child(text(summary).font(k.ty.small).color(k.c.text_muted))
+        .child(
+            col()
+                .w_full()
+                .max_h(440.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(list),
+        );
+    let all = s
+        .pr()
+        .map(|p| format!("{}/checks", p.url))
+        .unwrap_or_default();
+    let open_all = Button::new("Open on GitHub")
+        .variant(ButtonVariant::Ghost)
+        .disabled(all.is_empty())
+        .on_press_tx(move |_: &mut App, tx| {
+            let _ = tx.open_url(&all);
+        })
+        .build(k);
+    let refresh = Button::new("Refresh")
+        .variant(ButtonVariant::Ghost)
+        .on_press(|s: &mut App| s.reload_comments(Duration::ZERO))
+        .build(k);
+    let done = Button::new("Done")
+        .variant(ButtonVariant::Contrast)
+        .on_press(|s: &mut App| s.confirm = None)
+        .build(k);
+    let title = if count(CheckResult::Pending) > 0 {
+        "CI checks (refreshing every 15s)"
+    } else {
+        "CI checks"
+    };
+    modal_wide(
+        "checks",
+        title,
+        None,
+        vec![body],
+        vec![open_all, refresh, done],
+        k,
+        layer,
+        620.0,
+    );
+}
+
 /// A dialog sized to its content, with a padded body and right-aligned actions.
 fn modal(
     key: &str,
@@ -2345,6 +2515,20 @@ fn modal(
     actions: Vec<El>,
     k: &Kit,
     layer: &mut Vec<El>,
+) {
+    modal_wide(key, title, description, body, actions, k, layer, 460.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn modal_wide(
+    key: &str,
+    title: &str,
+    description: Option<&str>,
+    body: Vec<El>,
+    actions: Vec<El>,
+    k: &Kit,
+    layer: &mut Vec<El>,
+    width: f32,
 ) {
     let mut footer = row().w_full().gap(8.0).pt(4.0).child(row().grow(1.0));
     for a in actions {
@@ -2364,7 +2548,7 @@ fn modal(
     Dialog::new(key, title)
         .open(true)
         .fit()
-        .width(460.0)
+        .width(width)
         .child(content)
         .on_close(|s: &mut App| {
             s.add_repo = None;
@@ -2433,6 +2617,7 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 layer,
             );
         }
+        Some(Confirm::Checks) => checks_dialog(s, k, layer),
         Some(Confirm::Merge(r)) => {
             let Some(r) = r else {
                 let wait = row()
@@ -2609,7 +2794,44 @@ fn demo(s: &mut App) {
     };
     s.detail = Some(PrDetail {
         body: "Spreads retries out so clients that failed together don't retry together.".into(),
-        checks: vec![("ci".into(), model::CheckResult::Pass)],
+        checks: [
+            (
+                "CICD",
+                "Build (ubuntu)",
+                CheckResult::Pass,
+                "success",
+                "2026-11-09T10:00:00Z",
+                "2026-11-09T10:04:12Z",
+            ),
+            (
+                "CICD",
+                "Clippy",
+                CheckResult::Fail,
+                "failure",
+                "2026-11-09T10:00:00Z",
+                "2026-11-09T10:01:30Z",
+            ),
+            (
+                "CICD",
+                "Build (macos)",
+                CheckResult::Pending,
+                "in progress",
+                "2026-11-09T10:00:00Z",
+                "",
+            ),
+            ("", "license/cla", CheckResult::Pass, "success", "", ""),
+        ]
+        .into_iter()
+        .map(|(w, n, result, state, a, b)| Check {
+            name: n.into(),
+            workflow: w.into(),
+            result,
+            state: state.into(),
+            url: "https://github.com/acme/widgets/actions/runs/1".into(),
+            started: a.into(),
+            completed: b.into(),
+        })
+        .collect(),
         head_sha: "abc".into(),
         comments: vec![
             c("bob", "Nice, this has bitten us before.", None, None, None),
@@ -2671,6 +2893,11 @@ fn main() {
                     }],
                 );
                 s.open_composer(LineRange::line(0, LineRef::new(Side::New, 2)));
+            }),
+            ("checks", |s: &mut App| {
+                demo(s);
+                s.toast = None;
+                s.confirm = Some(Confirm::Checks);
             }),
             ("comments", |s: &mut App| {
                 demo(s);
