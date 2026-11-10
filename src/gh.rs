@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::model::{CheckResult, MergeMethod, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
+use crate::model::{CheckResult, Comment, MergeMethod, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 
 pub fn clone(slug: &str, dir: &Path) -> Result<()> {
     if let Some(parent) = dir.parent() {
@@ -40,12 +40,78 @@ pub fn pr_diff(slug: &str, number: u64) -> Result<String> {
 
 pub fn pr_detail(slug: &str, number: u64) -> Result<PrDetail> {
     let n = number.to_string();
-    let out = gh(&["pr", "view", &n, "-R", slug, "--json", "body,statusCheckRollup"], None)?;
+    let out = gh(&["pr", "view", &n, "-R", slug, "--json", "body,statusCheckRollup,headRefOid,comments,reviews"], None)?;
     let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| anyhow!("failed to parse gh pr view: {e}"))?;
-    Ok(PrDetail {
-        body: v.get("body").and_then(Value::as_str).unwrap_or("").to_string(),
-        checks: checks(&v),
-    })
+    let s = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let login = |v: &Value, k: &str| v.get(k).and_then(|a| a.get("login")).and_then(Value::as_str).unwrap_or("ghost").to_string();
+    let mut comments: Vec<Comment> = Vec::new();
+    for c in v["comments"].as_array().into_iter().flatten() {
+        comments.push(Comment {
+            author: login(c, "author"),
+            body: s(c, "body"),
+            created: s(c, "createdAt"),
+            review_state: None,
+            path: None,
+            line: None,
+            left: false,
+            reply: false,
+        });
+    }
+    for r in v["reviews"].as_array().into_iter().flatten() {
+        let state = s(r, "state");
+        // Reviews that are only a container for inline comments add nothing on their own.
+        if state == "COMMENTED" && s(r, "body").trim().is_empty() || state == "PENDING" {
+            continue;
+        }
+        comments.push(Comment {
+            author: login(r, "author"),
+            body: s(r, "body"),
+            created: s(r, "submittedAt"),
+            review_state: Some(state),
+            path: None,
+            line: None,
+            left: false,
+            reply: false,
+        });
+    }
+    let path = format!("repos/{slug}/pulls/{number}/comments?per_page=100");
+    let inline = gh(&["api", &path, "--paginate", "--slurp"], None)?;
+    let pages: Value = serde_json::from_slice(&inline.stdout).map_err(|e| anyhow!("failed to parse review comments: {e}"))?;
+    for c in pages.as_array().into_iter().flatten().flat_map(|p| p.as_array().into_iter().flatten()) {
+        let line = c["line"].as_u64().or_else(|| c["original_line"].as_u64());
+        comments.push(Comment {
+            author: login(c, "user"),
+            body: s(c, "body"),
+            created: s(c, "created_at"),
+            review_state: None,
+            path: Some(s(c, "path")),
+            line: line.map(|l| l as u32),
+            left: s(c, "side") == "LEFT",
+            reply: !c["in_reply_to_id"].is_null(),
+        });
+    }
+    comments.sort_by(|a, b| a.created.cmp(&b.created));
+    Ok(PrDetail { body: s(&v, "body"), checks: checks(&v), head_sha: s(&v, "headRefOid"), comments })
+}
+
+pub fn add_comment(slug: &str, number: u64, body: &str) -> Result<()> {
+    let n = number.to_string();
+    gh(&["pr", "comment", &n, "-R", slug, "--body-file", "-"], Some(body))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+/// A single inline comment on `path`, spanning `start..=end` on one side of the diff.
+pub fn add_line_comment(slug: &str, number: u64, commit: &str, path: &str, start: u32, end: u32, left: bool, body: &str) -> Result<()> {
+    let side = if left { "LEFT" } else { "RIGHT" };
+    let mut payload = serde_json::json!({ "body": body, "commit_id": commit, "path": path, "line": end, "side": side });
+    if start != end {
+        payload["start_line"] = start.into();
+        payload["start_side"] = side.into();
+    }
+    let api = format!("repos/{slug}/pulls/{number}/comments");
+    gh(&["api", &api, "--method", "POST", "--input", "-"], Some(&payload.to_string()))?;
+    Ok(())
 }
 
 pub fn merge_readiness(slug: &str, number: u64) -> Result<MergeReadiness> {

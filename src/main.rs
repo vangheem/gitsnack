@@ -12,11 +12,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use rune::{AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, el, row, text};
-use rune_kit::diff::{DiffMode, DiffState, DiffView, FileDiff, LineRange, Side, parse};
+use rune_kit::diff::{Annotation, DiffMode, DiffState, DiffView, FileDiff, LineRange, LineRef, Side, parse};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Badge, BadgeVariant, Button, Checkbox, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
+use rune_kit::{Badge, BadgeVariant, Button, Checkbox, FileNode, FileTree, Tree, TreeItem, TreeModel, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
 
-use model::{CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
+use model::{Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 use opencode::{Client, Entry, Snapshot};
 use store::Store;
 
@@ -51,6 +51,7 @@ struct Repo {
 #[derive(Clone, Copy, PartialEq)]
 enum Panel {
     Agent,
+    Comments,
     Review,
 }
 
@@ -73,6 +74,7 @@ struct App {
     range_base: Option<String>,
     target: Option<Target>,
     diff: DiffState,
+    files: TreeModel<FileNode<usize>>,
     diff_loading: bool,
     diff_error: Option<String>,
     detail: Option<PrDetail>,
@@ -82,6 +84,7 @@ struct App {
     next_chat_poll: f64,
     composer: TextEdit,
     review: TextEdit,
+    comment: TextEdit,
     busy: bool,
     confirm: Option<Confirm>,
     add_repo: Option<TextEdit>,
@@ -114,6 +117,7 @@ fn init() -> App {
         range_base: None,
         target: None,
         diff: DiffState::new(Vec::new()),
+        files: TreeModel::new(),
         diff_loading: false,
         diff_error: None,
         detail: None,
@@ -123,6 +127,7 @@ fn init() -> App {
         next_chat_poll: 0.0,
         composer: TextEdit::new(""),
         review: TextEdit::new(""),
+        comment: TextEdit::new(""),
         busy: false,
         confirm: None,
         add_repo: None,
@@ -168,6 +173,85 @@ impl App {
     fn pr(&self) -> Option<&PullRequest> {
         let Some(Target::Pr(slug, n)) = &self.target else { return None };
         self.repos.get(slug)?.prs.iter().find(|p| p.number == *n)
+    }
+
+    fn set_diff(&mut self, files: Vec<FileDiff>) {
+        let mut tree = FileTree::new().build(files.iter().enumerate().map(|(i, f)| (f.path().to_string(), i)));
+        tree.expand_all();
+        self.files = tree;
+        self.diff = DiffState::new(files);
+    }
+
+    /// Puts each inline comment thread under its line in the diff.
+    fn annotate(&mut self) {
+        let Some(d) = &self.detail else { return };
+        let mut by_line: BTreeMap<(usize, bool, u32), Vec<usize>> = BTreeMap::new();
+        for (i, c) in d.comments.iter().enumerate() {
+            let (Some(path), Some(line)) = (&c.path, c.line) else { continue };
+            if let Some(file) = self.diff.file_index(path) {
+                by_line.entry((file, c.left, line)).or_default().push(i);
+            }
+        }
+        let notes = by_line
+            .into_iter()
+            .map(|((file, left, line), ids)| {
+                let side = if left { Side::Old } else { Side::New };
+                let id = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+                Annotation::new(file, LineRef::new(side, line), id)
+            })
+            .collect();
+        self.diff.set_annotations(notes);
+    }
+
+    fn reload_comments(&mut self) {
+        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let target = self.target.clone();
+        self.bg(move || gh::pr_detail(&slug, n), move |s, res, _| {
+            if s.target != target {
+                return;
+            }
+            match res {
+                Ok(d) => {
+                    s.detail = Some(d);
+                    s.annotate();
+                }
+                Err(e) => s.notify(e.to_string(), true),
+            }
+        });
+    }
+
+    /// Posts the composer as a PR comment, or on the selected diff lines when there are some.
+    fn post_comment(&mut self) {
+        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let body = self.comment.text.trim().to_string();
+        if body.is_empty() || self.busy {
+            return;
+        }
+        let line = self.diff.selection().and_then(|r| {
+            let f = self.diff.files().get(r.file)?;
+            let commit = self.detail.as_ref()?.head_sha.clone();
+            let (a, b) = (r.start.line.min(r.end.line), r.start.line.max(r.end.line));
+            Some((commit, f.path().to_string(), a, b, r.end.side == Side::Old))
+        });
+        self.busy = true;
+        self.bg(
+            move || match line {
+                Some((commit, path, a, b, left)) => gh::add_line_comment(&slug, n, &commit, &path, a, b, left, &body),
+                None => gh::add_comment(&slug, n, &body),
+            },
+            |s, res, _| {
+                s.busy = false;
+                match res {
+                    Ok(()) => {
+                        s.comment = TextEdit::new("");
+                        s.diff.set_selection(None);
+                        s.notify("Comment posted", false);
+                        s.reload_comments();
+                    }
+                    Err(e) => s.notify(e.to_string(), true),
+                }
+            },
+        );
     }
 
     fn pr_key(&self) -> Option<String> {
@@ -244,7 +328,7 @@ impl App {
     fn open(&mut self, target: Target, tx: &mut Tx) {
         self.browse = None;
         self.target = Some(target.clone());
-        self.diff = DiffState::new(Vec::new());
+        self.set_diff(Vec::new());
         self.diff_loading = true;
         self.diff_error = None;
         self.detail = None;
@@ -272,7 +356,7 @@ impl App {
                 match res {
                     Ok((patch, detail)) => {
                         let mode = s.diff.mode();
-                        s.diff = DiffState::new(parse(&patch));
+                        s.set_diff(parse(&patch));
                         s.diff.set_mode(mode);
                         for i in 0..s.diff.files().len() {
                             if s.is_viewed(i) {
@@ -280,6 +364,7 @@ impl App {
                             }
                         }
                         s.detail = detail;
+                        s.annotate();
                     }
                     Err(e) => s.diff_error = Some(e.to_string()),
                 }
@@ -837,7 +922,91 @@ fn main_pane(s: &App, k: &Kit) -> El {
             Checkbox::new(s.is_viewed(i)).label("Viewed").on_toggle(move |s: &mut App| s.toggle_viewed(i)).build(&kc)
         });
     }
-    c.child(col().w_full().grow(1.0).min_h(0.0).child(dv.build(s, k)))
+    if let Some(d) = &s.detail {
+        let kc = k.clone();
+        let comments = d.comments.clone();
+        dv = dv.annotation(move |_: &App, a: &Annotation| {
+            let mut thread = col().w_full().gap(8.0).padding(10.0).radius(8.0).fill(kc.c.layer_01).border(1.0, kc.c.border_muted);
+            for id in a.id.split(',').filter_map(|i| i.parse::<usize>().ok()) {
+                if let Some(c) = comments.get(id) {
+                    thread = thread.child(comment_card(&kc, c, false));
+                }
+            }
+            col().w_full().px(12.0).py(6.0).child(thread)
+        });
+    }
+    dv = dv.on_visible_file(|s: &mut App, i| {
+        if let Some(path) = s.diff.files().get(i).map(|f| f.path().to_string()) {
+            s.files.select(&path);
+        }
+    });
+    let body = row().w_full().grow(1.0).min_h(0.0).child(file_tree(s, k)).child(col().grow(1.0).h_full().min_w(0.0).child(dv.build(s, k)));
+    c.child(body)
+}
+
+fn file_tree(s: &App, k: &Kit) -> El {
+    let stats: Vec<(u32, u32, bool)> =
+        s.diff.files().iter().enumerate().map(|(i, f)| (f.additions() as u32, f.deletions() as u32, s.is_viewed(i))).collect();
+    let check = k.c.success.icon;
+    let ty = k.ty.small_medium;
+    let tree = Tree::new(|s: &App| &s.files, |s: &mut App| &mut s.files, |n: &FileNode<usize>| n.name.as_str())
+        .name("Changed files")
+        .row(move |n, r| {
+            let item = TreeItem::file(n, r);
+            match n.data.and_then(|i| stats.get(i)) {
+                Some(&(a, d, viewed)) => {
+                    let item = item.changes(a, d);
+                    if viewed { item.trailing(text("✓").font(ty).color(check)) } else { item }
+                }
+                None => item,
+            }
+        })
+        .on_select(|s: &mut App, path: &str, tx: &mut Tx| {
+            if let Some(i) = s.diff.file_index(path) {
+                s.diff.scroll_to_file(i, tx);
+            }
+        })
+        .build(s, k)
+        .grow(1.0)
+        .min_h(0.0);
+    col()
+        .key("file-tree")
+        .w(260.0)
+        .h_full()
+        .padding(8.0)
+        .gap(6.0)
+        .border_sides([0.0, 1.0, 0.0, 0.0], k.c.border_muted)
+        .child(text(format!("{} changed files", s.diff.files().len())).font(k.ty.small_medium).color(k.c.text_muted).px(6.0).py(4.0))
+        .child(tree)
+}
+
+fn comment_card(k: &Kit, c: &Comment, show_path: bool) -> El {
+    let mut head = row()
+        .w_full()
+        .gap(8.0)
+        .items_center()
+        .child(text(format!("@{}", c.author)).font(k.ty.small_medium).color(k.c.text_base))
+        .child(text(c.created.get(..10).unwrap_or("").to_string()).font(k.ty.small).color(k.c.text_faint));
+    if let Some(state) = &c.review_state {
+        let (label, v) = match state.as_str() {
+            "APPROVED" => ("approved", BadgeVariant::Accent),
+            "CHANGES_REQUESTED" => ("changes requested", BadgeVariant::Neutral),
+            _ => ("reviewed", BadgeVariant::Subtle),
+        };
+        head = head.child(Badge::new(label).variant(v).build(k));
+    }
+    if show_path
+        && let (Some(path), Some(line)) = (&c.path, c.line) {
+            head = head.child(text(format!("{path}:{line}")).font(k.ty.mono).color(k.c.text_muted).truncate().shrink());
+        }
+    let mut card = col().w_full().gap(4.0).child(head);
+    if !c.body.trim().is_empty() {
+        card = card.child(Markdown::new(c.body.clone()).selectable(true).build(k));
+    }
+    if c.reply {
+        card = card.pl(12.0).border_sides([0.0, 0.0, 0.0, 2.0], k.c.border_muted);
+    }
+    card
 }
 
 fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
@@ -960,15 +1129,24 @@ fn inspector(s: &App, k: &Kit) -> El {
             .center()
             .child(text("Open a pull request to talk to the agent about it or review it.").font(k.ty.ui).color(k.c.text_muted).wrap());
     }
-    let tabs = SegmentedControl::new(&["Agent", "Review"], Some((s.panel == Panel::Review) as usize))
-        .width(Some(200.0))
+    let count = s.detail.as_ref().map_or(0, |d| d.comments.len());
+    let comments_label = if count > 0 { format!("Comments ({count})") } else { "Comments".to_string() };
+    let labels = ["Agent".to_string(), comments_label, "Review".to_string()];
+    let current = match s.panel {
+        Panel::Agent => 0,
+        Panel::Comments => 1,
+        Panel::Review => 2,
+    };
+    let tabs = SegmentedControl::new(&labels, Some(current))
+        .width(Some(340.0))
         .on_pick(|s: &mut App, i, _: &mut Tx| {
-            s.panel = if i == 0 { Panel::Agent } else { Panel::Review };
+            s.panel = [Panel::Agent, Panel::Comments, Panel::Review][i.min(2)];
             s.next_chat_poll = 0.0;
         })
         .build(k);
     let body = match s.panel {
         Panel::Agent => agent_panel(s, k),
+        Panel::Comments => comments_panel(s, k),
         Panel::Review => review_panel(s, k),
     };
     col().w_full().h_full().min_h(0.0).child(row().w_full().px(12.0).py(8.0).child(tabs)).child(body)
@@ -1125,6 +1303,78 @@ fn permission(k: &Kit, p: &opencode::Permission) -> El {
         .key(format!("perm/{}", p.id))
 }
 
+fn comments_panel(s: &App, k: &Kit) -> El {
+    let mut list = col().w_full().gap(14.0).padding(12.0);
+    match &s.detail {
+        None => list = list.child(Spinner::new().build(k)),
+        Some(d) if d.comments.is_empty() => {
+            list = list.child(text("No comments yet.").font(k.ty.ui).color(k.c.text_muted));
+        }
+        Some(d) => {
+            for (i, c) in d.comments.iter().enumerate() {
+                let mut card = col().w_full().padding(10.0).radius(8.0).fill(k.c.layer_01).child(comment_card(k, c, true));
+                if let (Some(path), Some(line)) = (c.path.clone(), c.line) {
+                    let left = c.left;
+                    card = k.interactive(card.on_press_tx(move |s: &mut App, tx| {
+                        if let Some(f) = s.diff.file_index(&path) {
+                            s.diff.set_collapsed(f, false);
+                            s.diff.scroll_to_line(f, LineRef::new(if left { Side::Old } else { Side::New }, line), tx);
+                        }
+                    }));
+                }
+                list = list.child(card.key(format!("c{i}")));
+            }
+        }
+    }
+    let target = s.diff.selection().and_then(|r| {
+        let f = s.diff.files().get(r.file)?;
+        let (a, b) = (r.start.line.min(r.end.line), r.start.line.max(r.end.line));
+        Some(if a == b { format!("{}:{a}", f.path()) } else { format!("{}:{a}-{b}", f.path()) })
+    });
+    let hint = match &target {
+        Some(t) => format!("Commenting on {t}"),
+        None => "Commenting on the PR. Click line numbers in the diff to comment on lines.".to_string(),
+    };
+    let mut actions = row().w_full().gap(8.0).items_center().child(text(hint).font(k.ty.small).color(k.c.text_muted).wrap().grow(1.0));
+    if target.is_some() {
+        actions = actions.child(
+            Button::new("Clear lines")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.diff.set_selection(None))
+                .build(k),
+        );
+    }
+    actions = actions.child(
+        Button::new("Comment")
+            .variant(ButtonVariant::Contrast)
+            .control_size(ControlSize::Small)
+            .disabled(s.busy || s.comment.text.trim().is_empty())
+            .on_press(|s: &mut App| s.post_comment())
+            .build(k),
+    );
+    let composer = col()
+        .w_full()
+        .gap(8.0)
+        .padding(12.0)
+        .border_sides([1.0, 0.0, 0.0, 0.0], k.c.border_muted)
+        .child(
+            TextArea::new(&s.comment)
+                .placeholder("Leave a comment (markdown)…")
+                .auto_grow(3, 12)
+                .width(None)
+                .on_edit(|s: &mut App| &mut s.comment)
+                .build(k),
+        )
+        .child(actions);
+    col()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(list))
+        .child(composer)
+}
+
 fn review_panel(s: &App, k: &Kit) -> El {
     let btn = |label: &'static str, kind: ReviewKind, v: ButtonVariant| {
         Button::new(label).variant(v).disabled(s.busy).on_press(move |s: &mut App| s.submit_review(kind)).build(k)
@@ -1268,13 +1518,33 @@ fn demo(s: &mut App) {
     s.repos = BTreeMap::from([(slug.clone(), repo)]);
     s.store.sessions.insert(store::session_key(&slug, 42), "ses_demo".into());
     s.target = Some(Target::Pr(slug, 42));
-    s.detail = Some(PrDetail { body: "Spreads retries out so clients that failed together don't retry together.".into(), checks: vec![("ci".into(), model::CheckResult::Pass)] });
-    s.diff = DiffState::new(parse(
+    let c = |author: &str, body: &str, path: Option<&str>, line, state: Option<&str>| Comment {
+        author: author.into(),
+        body: body.into(),
+        created: "2026-11-09T10:00:00Z".into(),
+        review_state: state.map(Into::into),
+        path: path.map(Into::into),
+        line,
+        left: false,
+        reply: false,
+    };
+    s.detail = Some(PrDetail {
+        body: "Spreads retries out so clients that failed together don't retry together.".into(),
+        checks: vec![("ci".into(), model::CheckResult::Pass)],
+        head_sha: "abc".into(),
+        comments: vec![
+            c("bob", "Nice, this has bitten us before.", None, None, None),
+            c("carol", "Should `jitter` be configurable?", Some("src/retry.rs"), Some(4), None),
+            c("dave", "", None, None, Some("APPROVED")),
+        ],
+    });
+    s.set_diff(parse(
         "diff --git a/src/retry.rs b/src/retry.rs\n--- a/src/retry.rs\n+++ b/src/retry.rs\n@@ -1,4 +1,5 @@\n pub struct Backoff {\n     base: Duration,\n-    max: Duration,\n+    max: Duration,\n+    jitter: f32,\n }\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,2 @@\n # widgets\n-Retries back off.\n+Retries back off, with jitter.\n",
     ));
     let h = file_hash(&s.diff.files()[1]);
     s.store.viewed.insert(store::session_key("acme/widgets", 42), BTreeMap::from([("README.md".to_string(), h)]));
     s.diff.set_collapsed(1, true);
+    s.annotate();
     s.toast = Some(("Approved".into(), false));
     s.chats.insert(
         "ses_demo".into(),
@@ -1295,6 +1565,10 @@ fn main() {
         scenes: &[("demo", demo), ("add-repo", |s: &mut App| {
             demo(s);
             s.add_repo = Some(TextEdit::new(""));
+        }), ("comments", |s: &mut App| {
+            demo(s);
+            s.panel = Panel::Comments;
+            s.toast = None;
         }), ("merge", |s: &mut App| {
             demo(s);
             s.confirm = Some(Confirm::Merge(Some(MergeReadiness::assess(true, "MERGEABLE", "CLEAN", false, &[("ci".into(), model::CheckResult::Pending)], Some(model::MergeMethod::Squash)))));
@@ -1352,5 +1626,19 @@ mod agent_tests {
         let snap = oc.snapshot(&id).unwrap();
         oc.delete_session(&id).unwrap();
         assert!(matches!(snap.entries.first(), Some(Entry::User(t)) if t.contains("pong")));
+    }
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    /// Hits GitHub: `cargo test -- --ignored`. hexyl#300 has inline review comments.
+    #[test]
+    #[ignore]
+    fn reads_inline_comments() {
+        let d = gh::pr_detail("sharkdp/hexyl", 300).unwrap();
+        assert!(!d.head_sha.is_empty());
+        assert!(d.comments.iter().any(|c| c.path.is_some() && c.line.is_some()));
     }
 }

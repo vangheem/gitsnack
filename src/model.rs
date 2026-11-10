@@ -19,6 +19,23 @@ pub struct PullRequest {
 pub struct PrDetail {
     pub body: String,
     pub checks: Vec<(String, CheckResult)>,
+    pub head_sha: String,
+    pub comments: Vec<Comment>,
+}
+
+/// A conversation comment, a review summary, or an inline comment on a diff line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    pub author: String,
+    pub body: String,
+    pub created: String,
+    /// `APPROVED`, `CHANGES_REQUESTED` or `COMMENTED` for review summaries.
+    pub review_state: Option<String>,
+    /// Inline comments: the file, line and whether it's on the old (`LEFT`) side.
+    pub path: Option<String>,
+    pub line: Option<u32>,
+    pub left: bool,
+    pub reply: bool,
 }
 
 #[derive(Debug, Clone)]
