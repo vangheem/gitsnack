@@ -2,7 +2,9 @@
 name = "gitsnack"
 version = "0.1.0"
 edition = "2024"
-description = "Native pull request review app with opencode agent sessions layered onto each PR"
+description = "Native GitHub PR review app with opencode agent sessions"
+license = "MIT"
+repository = "https://github.com/vangheem/gitsnack"
 
 [dependencies]
 anyhow = "1"

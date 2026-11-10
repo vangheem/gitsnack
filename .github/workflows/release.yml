@@ -1,0 +1,85 @@
+name: Release
+
+# Every push to main refreshes the rolling `latest` prerelease; a `v*` tag publishes a release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+      - name: Package
+        run: |
+          mkdir -p dist/pkg
+          lipo -create -output dist/pkg/gitsnack \
+            target/aarch64-apple-darwin/release/gitsnack \
+            target/x86_64-apple-darwin/release/gitsnack
+          lipo -info dist/pkg/gitsnack
+          cp README.md LICENSE dist/pkg/
+          tar -C dist/pkg -czf dist/gitsnack-macos-universal.tar.gz .
+          shasum -a 256 dist/gitsnack-macos-universal.tar.gz | sed 's|dist/||' > dist/gitsnack-macos-universal.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/gitsnack-macos-universal.tar.gz*
+
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          mkdir -p dist/pkg
+          cp target/release/gitsnack README.md LICENSE dist/pkg/
+          tar -C dist/pkg -czf dist/gitsnack-linux-x86_64.tar.gz .
+          sha256sum dist/gitsnack-linux-x86_64.tar.gz | sed 's|dist/||' > dist/gitsnack-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/gitsnack-linux-x86_64.tar.gz*
+
+  publish:
+    name: Publish
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+      - name: Rolling `latest` prerelease
+        if: github.ref == 'refs/heads/main'
+        run: |
+          notes="Built from ${GITHUB_SHA::7} on main. Replaced on every push to main."
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest dist/* --target "$GITHUB_SHA" --prerelease \
+            --title "Latest build (${GITHUB_SHA::7})" --notes "$notes"

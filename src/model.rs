@@ -80,7 +80,11 @@ impl ReviewState {
                 _ => {}
             }
         }
-        if commented { Self::Reviewed } else { Self::Unreviewed }
+        if commented {
+            Self::Reviewed
+        } else {
+            Self::Unreviewed
+        }
     }
 }
 
@@ -181,10 +185,16 @@ impl MergeReadiness {
         checks: &[(String, CheckResult)],
         method: Option<MergeMethod>,
     ) -> Self {
-        let failing: Vec<_> =
-            checks.iter().filter(|(_, r)| *r == CheckResult::Fail).map(|(n, _)| format!("{n} failing")).collect();
-        let pending: Vec<_> =
-            checks.iter().filter(|(_, r)| *r == CheckResult::Pending).map(|(n, _)| format!("{n} pending")).collect();
+        let failing: Vec<_> = checks
+            .iter()
+            .filter(|(_, r)| *r == CheckResult::Fail)
+            .map(|(n, _)| format!("{n} failing"))
+            .collect();
+        let pending: Vec<_> = checks
+            .iter()
+            .filter(|(_, r)| *r == CheckResult::Pending)
+            .map(|(n, _)| format!("{n} pending"))
+            .collect();
         let ci_ok = failing.is_empty() && pending.is_empty();
         let ci_label = if checks.is_empty() {
             "no checks".to_string()
@@ -195,7 +205,8 @@ impl MergeReadiness {
         } else {
             "passing".to_string()
         };
-        let merge_label = merge_block(mergeable, merge_state, draft, method).unwrap_or_else(|| "allowed".to_string());
+        let merge_label = merge_block(mergeable, merge_state, draft, method)
+            .unwrap_or_else(|| "allowed".to_string());
         let merge_ok = merge_label == "allowed";
         let mut problems = Vec::new();
         if !approved {
@@ -204,11 +215,24 @@ impl MergeReadiness {
         problems.extend(failing);
         problems.extend(pending);
         problems.truncate(6);
-        Self { approved, ci_ok, ci_label, merge_ok, merge_label, method, problems }
+        Self {
+            approved,
+            ci_ok,
+            ci_label,
+            merge_ok,
+            merge_label,
+            method,
+            problems,
+        }
     }
 }
 
-fn merge_block(mergeable: &str, merge_state: &str, draft: bool, method: Option<MergeMethod>) -> Option<String> {
+fn merge_block(
+    mergeable: &str,
+    merge_state: &str,
+    draft: bool,
+    method: Option<MergeMethod>,
+) -> Option<String> {
     if draft || merge_state == "DRAFT" {
         return Some("draft".to_string());
     }

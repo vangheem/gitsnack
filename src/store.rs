@@ -39,7 +39,10 @@ impl ModelRef {
 
     pub fn parse(key: &str) -> Option<ModelRef> {
         let (provider, id) = key.split_once('/')?;
-        Some(ModelRef { provider: provider.into(), id: id.into() })
+        Some(ModelRef {
+            provider: provider.into(),
+            id: id.into(),
+        })
     }
 }
 
@@ -54,7 +57,9 @@ pub struct Draft {
 }
 
 pub fn data_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/share"))
@@ -76,7 +81,10 @@ impl Store {
     }
 
     pub fn load() -> Store {
-        std::fs::read(Self::path()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+        std::fs::read(Self::path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
     }
 
     pub fn save(&self) -> Result<()> {
@@ -100,7 +108,11 @@ pub fn normalize_slug(input: &str) -> Option<String> {
         .unwrap_or(s);
     let mut parts = s.split('/');
     let (owner, name) = (parts.next()?, parts.next()?);
-    let valid = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+    let valid = |p: &str| {
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
     (parts.next().is_none() && valid(owner) && valid(name)).then(|| format!("{owner}/{name}"))
 }
 
@@ -110,8 +122,14 @@ mod tests {
 
     #[test]
     fn slugs_from_urls() {
-        assert_eq!(normalize_slug("https://github.com/anomalyco/rune.git").as_deref(), Some("anomalyco/rune"));
-        assert_eq!(normalize_slug("git@github.com:a/b.git").as_deref(), Some("a/b"));
+        assert_eq!(
+            normalize_slug("https://github.com/anomalyco/rune.git").as_deref(),
+            Some("anomalyco/rune")
+        );
+        assert_eq!(
+            normalize_slug("git@github.com:a/b.git").as_deref(),
+            Some("a/b")
+        );
         assert_eq!(normalize_slug(" a/b/ ").as_deref(), Some("a/b"));
         assert_eq!(normalize_slug("a/b/c"), None);
         assert_eq!(normalize_slug("nope"), None);

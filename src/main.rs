@@ -11,12 +11,24 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use rune::{AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, el, row, text};
-use rune_kit::diff::{Annotation, DiffMode, DiffState, DiffView, FileDiff, LineRange, LineRef, Side, parse};
-use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Badge, BadgeVariant, Button, Checkbox, Combobox, ComboboxOption, ComboboxState, IconButton, IconButtonVariant, FileNode, FileTree, Tree, TreeItem, TreeModel, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
+use rune::{
+    AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, el, row, text,
+};
+use rune_kit::diff::{
+    Annotation, DiffMode, DiffState, DiffView, FileDiff, LineRange, LineRef, Side, parse,
+};
+use rune_kit::shell::{
+    self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar,
+};
+use rune_kit::{
+    Badge, BadgeVariant, Button, ButtonVariant, Checkbox, Combobox, ComboboxOption, ComboboxState,
+    ControlSize, Dialog, FileNode, FileTree, IconButton, IconButtonVariant, Kit, Markdown,
+    SegmentedControl, Spinner, TextArea, TextInput, Tree, TreeItem, TreeModel,
+};
 
-use model::{Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
+use model::{
+    Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState,
+};
 use opencode::{Client, Entry, Snapshot};
 use store::{Draft, ModelRef, Store};
 
@@ -103,16 +115,43 @@ struct App {
 const REPO_REFRESH_SECS: f64 = 300.0;
 
 const PRESETS: &[(&str, &str)] = &[
-    ("Review", "Review this PR thoroughly. Focus on correctness, design and edge cases. Group findings by severity, with file:line references, and say what you would change."),
-    ("Summarize", "Summarize what this PR changes and why. Give an architectural overview and point out the critical code paths I should read closely."),
-    ("Risks", "What could this PR break? Look for regressions, security issues, performance problems, migrations and backwards-compatibility risks."),
-    ("Back-compat", "Review this PR for backward compatibility only. Check public APIs, wire and file formats, database schemas and migrations, config and CLI flags, defaults, and behavior existing callers rely on. For each break, say who is affected, how bad it is, and how to keep compatibility (shims, deprecation paths, versioning, migrations)."),
-    ("Tests", "Assess how well this change is tested. What is missing, and which cases would you add?"),
+    (
+        "Review",
+        "Review this PR thoroughly. Focus on correctness, design and edge cases. Group findings by severity, with file:line references, and say what you would change.",
+    ),
+    (
+        "Summarize",
+        "Summarize what this PR changes and why. Give an architectural overview and point out the critical code paths I should read closely.",
+    ),
+    (
+        "Risks",
+        "What could this PR break? Look for regressions, security issues, performance problems, migrations and backwards-compatibility risks.",
+    ),
+    (
+        "Back-compat",
+        "Review this PR for backward compatibility only. Check public APIs, wire and file formats, database schemas and migrations, config and CLI flags, defaults, and behavior existing callers rely on. For each break, say who is affected, how bad it is, and how to keep compatibility (shims, deprecation paths, versioning, migrations).",
+    ),
+    (
+        "Tests",
+        "Assess how well this change is tested. What is missing, and which cases would you add?",
+    ),
 ];
 
 fn init() -> App {
     let store = Store::load();
-    let repos = store.repos.iter().map(|r| (r.clone(), Repo { collapsed: true, ..Repo::default() })).collect();
+    let repos = store
+        .repos
+        .iter()
+        .map(|r| {
+            (
+                r.clone(),
+                Repo {
+                    collapsed: true,
+                    ..Repo::default()
+                },
+            )
+        })
+        .collect();
     App {
         store,
         jobs: channel(),
@@ -182,17 +221,27 @@ impl App {
 
     fn slug(&self) -> Option<String> {
         match self.target.as_ref()? {
-            Target::Pr(s, _) | Target::Branch(s, _) | Target::Commit(s, _) | Target::Range(s, _, _) => Some(s.clone()),
+            Target::Pr(s, _)
+            | Target::Branch(s, _)
+            | Target::Commit(s, _)
+            | Target::Range(s, _, _) => Some(s.clone()),
         }
     }
 
     fn pr(&self) -> Option<&PullRequest> {
-        let Some(Target::Pr(slug, n)) = &self.target else { return None };
+        let Some(Target::Pr(slug, n)) = &self.target else {
+            return None;
+        };
         self.repos.get(slug)?.prs.iter().find(|p| p.number == *n)
     }
 
     fn set_diff(&mut self, files: Vec<FileDiff>) {
-        let mut tree = FileTree::new().build(files.iter().enumerate().map(|(i, f)| (f.path().to_string(), i)));
+        let mut tree = FileTree::new().build(
+            files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (f.path().to_string(), i)),
+        );
         tree.expand_all();
         self.files = tree;
         self.diff = DiffState::new(files);
@@ -204,17 +253,24 @@ impl App {
         let mut by_line: BTreeMap<(usize, bool, u32), Vec<usize>> = BTreeMap::new();
         if let Some(d) = &self.detail {
             for (i, c) in d.comments.iter().enumerate() {
-                let (Some(path), Some(line)) = (&c.path, c.line) else { continue };
+                let (Some(path), Some(line)) = (&c.path, c.line) else {
+                    continue;
+                };
                 if let Some(file) = self.diff.file_index(path) {
                     by_line.entry((file, c.left, line)).or_default().push(i);
                 }
             }
         }
-        let at = |left: bool, line: u32| LineRef::new(if left { Side::Old } else { Side::New }, line);
+        let at =
+            |left: bool, line: u32| LineRef::new(if left { Side::Old } else { Side::New }, line);
         let mut notes: Vec<Annotation> = by_line
             .into_iter()
             .map(|((file, left, line), ids)| {
-                let id = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+                let id = ids
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 Annotation::new(file, at(left, line), format!("c:{id}"))
             })
             .collect();
@@ -230,7 +286,9 @@ impl App {
     }
 
     fn drafts(&self) -> &[Draft] {
-        self.pr_key().and_then(|k| self.store.drafts.get(&k)).map_or(&[], Vec::as_slice)
+        self.pr_key()
+            .and_then(|k| self.store.drafts.get(&k))
+            .map_or(&[], Vec::as_slice)
     }
 
     fn open_composer(&mut self, lines: LineRange) {
@@ -247,14 +305,24 @@ impl App {
 
     /// Adds the composer's text to the pending review as a comment on its lines.
     fn add_draft(&mut self) {
-        let (Some(key), Some((r, edit))) = (self.pr_key(), self.composing.clone()) else { return };
+        let (Some(key), Some((r, edit))) = (self.pr_key(), self.composing.clone()) else {
+            return;
+        };
         let body = edit.text.trim().to_string();
-        let Some(file) = self.diff.files().get(r.file) else { return };
+        let Some(file) = self.diff.files().get(r.file) else {
+            return;
+        };
         if body.is_empty() {
             return;
         }
         let (a, b) = (r.start.line.min(r.end.line), r.start.line.max(r.end.line));
-        let draft = Draft { path: file.path().to_string(), start: a, end: b, left: r.end.side == Side::Old, body };
+        let draft = Draft {
+            path: file.path().to_string(),
+            start: a,
+            end: b,
+            left: r.end.side == Side::Old,
+            body,
+        };
         self.store.drafts.entry(key).or_default().push(draft);
         self.save();
         self.composing = None;
@@ -277,7 +345,9 @@ impl App {
 
     /// Sends the composer's text and line reference to the agent instead.
     fn composer_to_agent(&mut self) {
-        let Some((r, edit)) = self.composing.take() else { return };
+        let Some((r, edit)) = self.composing.take() else {
+            return;
+        };
         self.ask_about(r);
         let extra = edit.text.trim();
         if !extra.is_empty() {
@@ -291,7 +361,9 @@ impl App {
     /// Re-reads the PR's comments. GitHub's reads lag its writes by a moment, so after posting,
     /// `after` delays the read and comments posted from here that it doesn't have yet are kept.
     fn reload_comments(&mut self, after: Duration) {
-        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+            return;
+        };
         let target = self.target.clone();
         self.bg(
             move || {
@@ -306,7 +378,9 @@ impl App {
                     Ok(mut d) => {
                         let fresh = std::mem::take(&mut s.posted);
                         for c in fresh {
-                            if d.comments.iter().any(|x| x.author == c.author && x.body == c.body && x.created == c.created) {
+                            if d.comments.iter().any(|x| {
+                                x.author == c.author && x.body == c.body && x.created == c.created
+                            }) {
                                 continue;
                             }
                             s.posted.push(c.clone());
@@ -335,7 +409,9 @@ impl App {
 
     /// Posts the composer as a PR comment, or on the selected diff lines when there are some.
     fn post_comment(&mut self) {
-        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+            return;
+        };
         let body = self.comment.text.trim().to_string();
         if body.is_empty() || self.busy {
             return;
@@ -349,7 +425,9 @@ impl App {
         self.busy = true;
         self.bg(
             move || match line {
-                Some((commit, path, a, b, left)) => gh::add_line_comment(&slug, n, &commit, &path, a, b, left, &body),
+                Some((commit, path, a, b, left)) => {
+                    gh::add_line_comment(&slug, n, &commit, &path, a, b, left, &body)
+                }
                 None => gh::add_comment(&slug, n, &body),
             },
             |s, res, _| {
@@ -368,17 +446,27 @@ impl App {
     }
 
     fn pr_key(&self) -> Option<String> {
-        let Some(Target::Pr(slug, n)) = &self.target else { return None };
+        let Some(Target::Pr(slug, n)) = &self.target else {
+            return None;
+        };
         Some(store::session_key(slug, *n))
     }
 
     fn is_viewed(&self, file: usize) -> bool {
-        let (Some(key), Some(f)) = (self.pr_key(), self.diff.files().get(file)) else { return false };
-        self.store.viewed.get(&key).and_then(|m| m.get(f.path())).is_some_and(|h| *h == file_hash(f))
+        let (Some(key), Some(f)) = (self.pr_key(), self.diff.files().get(file)) else {
+            return false;
+        };
+        self.store
+            .viewed
+            .get(&key)
+            .and_then(|m| m.get(f.path()))
+            .is_some_and(|h| *h == file_hash(f))
     }
 
     fn toggle_viewed(&mut self, file: usize) {
-        let (Some(key), Some(f)) = (self.pr_key(), self.diff.files().get(file)) else { return };
+        let (Some(key), Some(f)) = (self.pr_key(), self.diff.files().get(file)) else {
+            return;
+        };
         let (path, hash) = (f.path().to_string(), file_hash(f));
         let viewed = !self.is_viewed(file);
         let map = self.store.viewed.entry(key.clone()).or_default();
@@ -395,13 +483,20 @@ impl App {
     }
 
     fn session_id(&self) -> Option<String> {
-        let Some(Target::Pr(slug, n)) = &self.target else { return None };
-        self.store.sessions.get(&store::session_key(slug, *n)).cloned()
+        let Some(Target::Pr(slug, n)) = &self.target else {
+            return None;
+        };
+        self.store
+            .sessions
+            .get(&store::session_key(slug, *n))
+            .cloned()
     }
 
     /// Clones (first time), fetches, and lists PRs, branches and commits for a repo.
     fn refresh_repo(&mut self, slug: &str) {
-        let Some(r) = self.repos.get_mut(slug) else { return };
+        let Some(r) = self.repos.get_mut(slug) else {
+            return;
+        };
         r.loading = true;
         r.error = None;
         let slug = slug.to_string();
@@ -423,7 +518,9 @@ impl App {
                 }
             },
             move |s, res, _| {
-                let Some(r) = s.repos.get_mut(&slug) else { return };
+                let Some(r) = s.repos.get_mut(&slug) else {
+                    return;
+                };
                 r.loading = false;
                 match res {
                     Ok((prs, branches, commits, default)) => {
@@ -452,15 +549,26 @@ impl App {
             self.panel = Panel::Agent;
         }
         tx.wake_after(Duration::from_millis(1));
-        let default = self.slug().and_then(|s| self.repos.get(&s)).map(|r| r.default_branch.clone()).unwrap_or_default();
+        let default = self
+            .slug()
+            .and_then(|s| self.repos.get(&s))
+            .map(|r| r.default_branch.clone())
+            .unwrap_or_default();
         let t = target.clone();
         self.bg(
             move || -> anyhow::Result<(String, Option<PrDetail>)> {
                 Ok(match &t {
                     Target::Pr(slug, n) => (gh::pr_diff(slug, *n)?, gh::pr_detail(slug, *n).ok()),
-                    Target::Branch(slug, b) => (git::branch_diff(&store::clone_dir(slug), &default, b)?, None),
-                    Target::Commit(slug, sha) => (git::commit_diff(&store::clone_dir(slug), sha)?, None),
-                    Target::Range(slug, a, b) => (git::range_diff(&store::clone_dir(slug), a, b)?, None),
+                    Target::Branch(slug, b) => (
+                        git::branch_diff(&store::clone_dir(slug), &default, b)?,
+                        None,
+                    ),
+                    Target::Commit(slug, sha) => {
+                        (git::commit_diff(&store::clone_dir(slug), sha)?, None)
+                    }
+                    Target::Range(slug, a, b) => {
+                        (git::range_diff(&store::clone_dir(slug), a, b)?, None)
+                    }
                 })
             },
             move |s, res, _| {
@@ -494,7 +602,9 @@ impl App {
     }
 
     fn add_repo(&mut self) {
-        let Some(edit) = self.add_repo.take() else { return };
+        let Some(edit) = self.add_repo.take() else {
+            return;
+        };
         let Some(slug) = store::normalize_slug(&edit.text) else {
             self.notify("Enter a repo as owner/name or a GitHub URL", true);
             self.add_repo = Some(edit);
@@ -510,13 +620,21 @@ impl App {
 
     fn remove_repo(&mut self, slug: &str) {
         self.store.repos.retain(|r| r != slug);
-        self.store.sessions.retain(|k, _| !k.starts_with(&format!("{slug}#")));
+        self.store
+            .sessions
+            .retain(|k, _| !k.starts_with(&format!("{slug}#")));
         self.repos.remove(slug);
         if self.slug().as_deref() == Some(slug) {
             self.target = None;
         }
         self.save();
-        self.notify(format!("Stopped tracking {slug}. Its clone stays in {}", store::clone_dir(slug).display()), false);
+        self.notify(
+            format!(
+                "Stopped tracking {slug}. Its clone stays in {}",
+                store::clone_dir(slug).display()
+            ),
+            false,
+        );
     }
 
     /// The opencode client once connected; starts connecting in the background otherwise.
@@ -541,7 +659,9 @@ impl App {
 
     /// Sends a prompt to the PR's session, creating the session (with PR context) first.
     fn ask(&mut self, prompt: String) {
-        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+            return;
+        };
         let Some(pr) = self.pr().cloned() else { return };
         let oc = self.client();
         let existing = self.session_id();
@@ -562,9 +682,20 @@ impl App {
                         }
                         (id, false)
                     }
-                    None => (oc.create_session(&format!("Review {slug}#{n}: {}", pr.title), &dir, model.as_ref())?, true),
+                    None => (
+                        oc.create_session(
+                            &format!("Review {slug}#{n}: {}", pr.title),
+                            &dir,
+                            model.as_ref(),
+                        )?,
+                        true,
+                    ),
                 };
-                let text = if fresh { format!("{}\n\n{prompt}", preamble(&slug, &pr)) } else { prompt };
+                let text = if fresh {
+                    format!("{}\n\n{prompt}", preamble(&slug, &pr))
+                } else {
+                    prompt
+                };
                 oc.prompt(&id, &text)?;
                 Ok((id, fresh))
             },
@@ -588,29 +719,38 @@ impl App {
     fn load_models(&mut self) {
         let Some(oc) = self.oc.clone() else { return };
         self.models_loading = true;
-        self.bg(move || oc.models(), |s, res, _| {
-            s.models_loading = false;
-            match res {
-                Ok(list) => {
-                    s.models = list
-                        .into_iter()
-                        .map(|(id, name, provider)| {
-                            let mut o = ComboboxOption::new(id, name);
-                            o.detail = provider;
-                            o
-                        })
-                        .collect();
+        self.bg(
+            move || oc.models(),
+            |s, res, _| {
+                s.models_loading = false;
+                match res {
+                    Ok(list) => {
+                        s.models = list
+                            .into_iter()
+                            .map(|(id, name, provider)| {
+                                let mut o = ComboboxOption::new(id, name);
+                                o.detail = provider;
+                                o
+                            })
+                            .collect();
+                    }
+                    Err(e) => s.notify(format!("Couldn't list opencode models: {e}"), true),
                 }
-                Err(e) => s.notify(format!("Couldn't list opencode models: {e}"), true),
-            }
-        });
+            },
+        );
     }
 
     fn choose_model(&mut self, key: &str) {
-        let Some(m) = ModelRef::parse(key) else { return };
+        let Some(m) = ModelRef::parse(key) else {
+            return;
+        };
         self.store.model = Some(m.clone());
         self.save();
-        let name = self.models.iter().find(|o| o.id == key).map_or(key.to_string(), |o| o.label.clone());
+        let name = self
+            .models
+            .iter()
+            .find(|o| o.id == key)
+            .map_or(key.to_string(), |o| o.label.clone());
         self.notify(format!("Agent model: {name}"), false);
         // Switch the open PR's session now, so its next turn already uses it.
         if self.session_id().is_some() {
@@ -627,32 +767,61 @@ impl App {
         self.ask(text);
     }
 
-    fn session_call(&mut self, f: impl FnOnce(&Client, &str) -> anyhow::Result<()> + Send + 'static) {
-        let (Some(oc), Some(id)) = (self.client(), self.session_id()) else { return };
-        self.bg(move || f(&oc, &id), |s, res, _| {
-            s.next_chat_poll = 0.0;
-            if let Err(e) = res {
-                s.notify(e.to_string(), true);
-            }
-        });
+    fn session_call(
+        &mut self,
+        f: impl FnOnce(&Client, &str) -> anyhow::Result<()> + Send + 'static,
+    ) {
+        let (Some(oc), Some(id)) = (self.client(), self.session_id()) else {
+            return;
+        };
+        self.bg(
+            move || f(&oc, &id),
+            |s, res, _| {
+                s.next_chat_poll = 0.0;
+                if let Err(e) = res {
+                    s.notify(e.to_string(), true);
+                }
+            },
+        );
     }
 
     fn open_terminal(&mut self) {
-        let (Some(slug), Some(id)) = (self.slug(), self.session_id()) else { return };
+        let (Some(slug), Some(id)) = (self.slug(), self.session_id()) else {
+            return;
+        };
         let dir = store::clone_dir(&slug);
         let cmd = format!("cd '{}' && opencode -s {id}", dir.display());
-        let script = format!("tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell", cmd.replace('"', "\\\""));
-        if let Err(e) = std::process::Command::new("osascript").args(["-e", &script]).spawn() {
+        let script = format!(
+            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
+            cmd.replace('"', "\\\"")
+        );
+        if let Err(e) = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+        {
             self.notify(format!("Couldn't open Terminal: {e}"), true);
         }
     }
 
     /// Puts a reference to the selected diff lines into the agent composer.
     fn ask_about(&mut self, lines: LineRange) {
-        let Some(file) = self.diff.files().get(lines.file) else { return };
-        let side = if lines.start.side == Side::Old { " (old side)" } else { "" };
-        let (a, b) = (lines.start.line.min(lines.end.line), lines.start.line.max(lines.end.line));
-        let at = if a == b { format!("{}:{a}", file.path()) } else { format!("{}:{a}-{b}", file.path()) };
+        let Some(file) = self.diff.files().get(lines.file) else {
+            return;
+        };
+        let side = if lines.start.side == Side::Old {
+            " (old side)"
+        } else {
+            ""
+        };
+        let (a, b) = (
+            lines.start.line.min(lines.end.line),
+            lines.start.line.max(lines.end.line),
+        );
+        let at = if a == b {
+            format!("{}:{a}", file.path())
+        } else {
+            format!("{}:{a}-{b}", file.path())
+        };
         let mut t = self.composer.text.trim_end().to_string();
         if !t.is_empty() {
             t.push('\n');
@@ -665,14 +834,20 @@ impl App {
     }
 
     fn submit_review(&mut self, kind: ReviewKind) {
-        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+            return;
+        };
         let body = self.review.text.trim().to_string();
         let drafts = self.drafts().to_vec();
         if kind.needs_body() && body.is_empty() && drafts.is_empty() {
             self.notify("Write a review body or add line comments first", true);
             return;
         }
-        let commit = self.detail.as_ref().map(|d| d.head_sha.clone()).unwrap_or_default();
+        let commit = self
+            .detail
+            .as_ref()
+            .map(|d| d.head_sha.clone())
+            .unwrap_or_default();
         let key = self.pr_key();
         self.busy = true;
         self.bg(
@@ -704,48 +879,72 @@ impl App {
     }
 
     fn check_merge(&mut self) {
-        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+            return;
+        };
         self.confirm = Some(Confirm::Merge(None));
-        self.bg(move || gh::merge_readiness(&slug, n), |s, res, _| match res {
-            Ok(r) => s.confirm = Some(Confirm::Merge(Some(r))),
-            Err(e) => {
-                s.confirm = None;
-                s.notify(e.to_string(), true);
-            }
-        });
+        self.bg(
+            move || gh::merge_readiness(&slug, n),
+            |s, res, _| match res {
+                Ok(r) => s.confirm = Some(Confirm::Merge(Some(r))),
+                Err(e) => {
+                    s.confirm = None;
+                    s.notify(e.to_string(), true);
+                }
+            },
+        );
     }
 
     fn merge(&mut self) {
-        let Some(Confirm::Merge(Some(r))) = self.confirm.take() else { return };
-        let (Some(Target::Pr(slug, n)), Some(method)) = (self.target.clone(), r.method) else { return };
+        let Some(Confirm::Merge(Some(r))) = self.confirm.take() else {
+            return;
+        };
+        let (Some(Target::Pr(slug, n)), Some(method)) = (self.target.clone(), r.method) else {
+            return;
+        };
         self.busy = true;
-        self.bg(move || gh::merge_pr(&slug, n, method).map(|_| slug), move |s, res, _| {
-            s.busy = false;
-            match res {
-                Ok(slug) => {
-                    s.notify(format!("Merged #{n} ({})", method.label()), false);
-                    s.target = None;
-                    s.refresh_repo(&slug);
+        self.bg(
+            move || gh::merge_pr(&slug, n, method).map(|_| slug),
+            move |s, res, _| {
+                s.busy = false;
+                match res {
+                    Ok(slug) => {
+                        s.notify(format!("Merged #{n} ({})", method.label()), false);
+                        s.target = None;
+                        s.refresh_repo(&slug);
+                    }
+                    Err(e) => s.notify(e.to_string(), true),
                 }
-                Err(e) => s.notify(e.to_string(), true),
-            }
-        });
+            },
+        );
     }
 
     fn set_draft(&mut self, draft: bool) {
         self.confirm = None;
-        let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
+        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+            return;
+        };
         self.busy = true;
-        self.bg(move || gh::set_draft(&slug, n, draft).map(|_| slug), move |s, res, _| {
-            s.busy = false;
-            match res {
-                Ok(slug) => {
-                    s.notify(if draft { "Converted to draft" } else { "Marked ready for review" }, false);
-                    s.refresh_repo(&slug);
+        self.bg(
+            move || gh::set_draft(&slug, n, draft).map(|_| slug),
+            move |s, res, _| {
+                s.busy = false;
+                match res {
+                    Ok(slug) => {
+                        s.notify(
+                            if draft {
+                                "Converted to draft"
+                            } else {
+                                "Marked ready for review"
+                            },
+                            false,
+                        );
+                        s.refresh_repo(&slug);
+                    }
+                    Err(e) => s.notify(e.to_string(), true),
                 }
-                Err(e) => s.notify(e.to_string(), true),
-            }
-        });
+            },
+        );
     }
 }
 
@@ -821,7 +1020,11 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     if s.toast.is_some() {
         match s.toast_until {
             None => {
-                let secs = if s.toast.as_ref().is_some_and(|t| t.1) { 8.0 } else { 4.0 };
+                let secs = if s.toast.as_ref().is_some_and(|t| t.1) {
+                    8.0
+                } else {
+                    4.0
+                };
                 s.toast_until = Some(now + secs);
                 tx.wake_after(Duration::from_secs_f64(secs));
             }
@@ -836,32 +1039,35 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     // Follow the open PR's session: quickly while the agent works, slowly otherwise so turns
     // taken from the TUI show up too.
     if let Some(id) = s.session_id()
-        && s.panel == Panel::Agent && !s.chat_inflight && now >= s.next_chat_poll
-            && let Some(oc) = s.client() {
-                s.chat_inflight = true;
-                s.bg(
-                    {
-                        let id = id.clone();
-                        move || oc.snapshot(&id)
-                    },
-                    move |s, res, tx| {
-                        s.chat_inflight = false;
-                        let running = match res {
-                            Ok(snap) => {
-                                let running = snap.running;
-                                if s.chats.get(&id) != Some(&snap) {
-                                    s.chats.insert(id, snap);
-                                }
-                                running
-                            }
-                            Err(_) => false,
-                        };
-                        let wait = if running { 0.8 } else { 5.0 };
-                        s.next_chat_poll = tx.clock() + wait;
-                        tx.wake_after(Duration::from_secs_f64(wait));
-                    },
-                );
-            }
+        && s.panel == Panel::Agent
+        && !s.chat_inflight
+        && now >= s.next_chat_poll
+        && let Some(oc) = s.client()
+    {
+        s.chat_inflight = true;
+        s.bg(
+            {
+                let id = id.clone();
+                move || oc.snapshot(&id)
+            },
+            move |s, res, tx| {
+                s.chat_inflight = false;
+                let running = match res {
+                    Ok(snap) => {
+                        let running = snap.running;
+                        if s.chats.get(&id) != Some(&snap) {
+                            s.chats.insert(id, snap);
+                        }
+                        running
+                    }
+                    Err(_) => false,
+                };
+                let wait = if running { 0.8 } else { 5.0 };
+                s.next_chat_poll = tx.clock() + wait;
+                tx.wake_after(Duration::from_secs_f64(wait));
+            },
+        );
+    }
     changed
 }
 
@@ -881,7 +1087,11 @@ fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.inspector.toggle();
         return true;
     }
-    if tx.focused().is_none() || s.target.is_some() { s.diff.key(ev, tx) } else { false }
+    if tx.focused().is_none() || s.target.is_some() {
+        s.diff.key(ev, tx)
+    } else {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------------------- view
@@ -894,15 +1104,26 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         Some(Target::Pr(slug, n)) => format!("{slug} #{n}"),
         Some(Target::Branch(slug, b)) => format!("{slug} · {b}"),
         Some(Target::Commit(slug, sha)) => format!("{slug} · {}", &sha[..sha.len().min(10)]),
-        Some(Target::Range(slug, a, b)) => format!("{slug} · {}…{}", &a[..a.len().min(8)], &b[..b.len().min(8)]),
+        Some(Target::Range(slug, a, b)) => {
+            format!("{slug} · {}…{}", &a[..a.len().min(8)], &b[..b.len().min(8)])
+        }
         None => "gitsnack".into(),
     };
     let toolbar = Toolbar::new()
-        .leading(text(title).font(k.ty.ui_medium).color(k.c.text_base).truncate())
+        .leading(
+            text(title)
+                .font(k.ty.ui_medium)
+                .color(k.c.text_base)
+                .truncate(),
+        )
         .trailing(toolbar_actions(s, &k));
     let split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
-        .inspector(&s.inspector, |s: &mut App| &mut s.inspector, inspector(s, &k, &mut layer))
+        .inspector(
+            &s.inspector,
+            |s: &mut App| &mut s.inspector,
+            inspector(s, &k, &mut layer),
+        )
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
         .frame_inset(8.0)
@@ -931,7 +1152,13 @@ fn toast(k: &Kit, msg: &str, error: bool) -> El {
         .fill(k.c.layer_01)
         .border(1.0, c.border)
         .child(el().size(8.0, 8.0).radius(4.0).fill(c.icon))
-        .child(text(msg.to_string()).font(k.ty.ui).color(k.c.text_base).wrap().shrink())
+        .child(
+            text(msg.to_string())
+                .font(k.ty.ui)
+                .color(k.c.text_base)
+                .wrap()
+                .shrink(),
+        )
         .pin(Some(16.0), None, None, Some(16.0))
         .on_press(|s: &mut App| s.toast = None);
     k.elevate(card, &k.elevation.overlay)
@@ -965,7 +1192,11 @@ fn toolbar_actions(s: &App, k: &Kit) -> El {
             )
             .child(
                 Button::new("Merge…")
-                    .variant(if pr.review == ReviewState::Approved { ButtonVariant::Contrast } else { ButtonVariant::Ghost })
+                    .variant(if pr.review == ReviewState::Approved {
+                        ButtonVariant::Contrast
+                    } else {
+                        ButtonVariant::Ghost
+                    })
                     .on_press(|s: &mut App| s.check_merge())
                     .build(k),
             );
@@ -976,7 +1207,11 @@ fn toolbar_actions(s: &App, k: &Kit) -> El {
                 .width(Some(150.0))
                 .on_pick(|s: &mut App, i, tx: &mut Tx| {
                     tx.motion(rune::tok::motion::SNAPPY);
-                    s.diff.set_mode(if i == 1 { DiffMode::Split } else { DiffMode::Unified });
+                    s.diff.set_mode(if i == 1 {
+                        DiffMode::Split
+                    } else {
+                        DiffMode::Unified
+                    });
                 })
                 .build(k),
         );
@@ -1028,14 +1263,28 @@ fn sidebar(s: &App, k: &Kit) -> El {
     for (slug, repo) in &s.repos {
         let mut rows = Vec::new();
         if repo.loading && repo.prs.is_empty() {
-            rows.push(SidebarRow::new("Loading…").select_only().build(k).key(format!("{slug}/loading")));
+            rows.push(
+                SidebarRow::new("Loading…")
+                    .select_only()
+                    .build(k)
+                    .key(format!("{slug}/loading")),
+            );
         }
         if let Some(e) = &repo.error {
-            rows.push(text(e.clone()).font(k.ty.small).color(k.c.danger.fg).wrap().key(format!("{slug}/err")));
+            rows.push(
+                text(e.clone())
+                    .font(k.ty.small)
+                    .color(k.c.danger.fg)
+                    .wrap()
+                    .key(format!("{slug}/err")),
+            );
         }
         for pr in &repo.prs {
             let target = Target::Pr(slug.clone(), pr.number);
-            let has_session = s.store.sessions.contains_key(&store::session_key(slug, pr.number));
+            let has_session = s
+                .store
+                .sessions
+                .contains_key(&store::session_key(slug, pr.number));
             let mut detail = format!("#{} · {}", pr.number, pr.author);
             if pr.is_draft {
                 detail.push_str(" · draft");
@@ -1103,28 +1352,56 @@ fn main_pane(s: &App, k: &Kit) -> El {
         } else {
             "Pick a pull request, branch or commit."
         };
-        return col().w_full().h_full().center().child(text(msg).font(k.ty.body).color(k.c.text_muted));
+        return col()
+            .w_full()
+            .h_full()
+            .center()
+            .child(text(msg).font(k.ty.body).color(k.c.text_muted));
     };
     let mut c = col().w_full().h_full().min_h(0.0);
     if let Target::Pr(..) = target
-        && let Some(pr) = s.pr() {
-            c = c.child(pr_header(s, k, pr));
-        }
+        && let Some(pr) = s.pr()
+    {
+        c = c.child(pr_header(s, k, pr));
+    }
     if let Some(e) = &s.diff_error {
-        return c.child(text(e.clone()).font(k.ty.ui).color(k.c.danger.fg).wrap().padding(16.0));
+        return c.child(
+            text(e.clone())
+                .font(k.ty.ui)
+                .color(k.c.danger.fg)
+                .wrap()
+                .padding(16.0),
+        );
     }
     if s.diff_loading {
-        return c.child(col().w_full().grow(1.0).center().child(Spinner::new().build(k)));
+        return c.child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .center()
+                .child(Spinner::new().build(k)),
+        );
     }
     if s.diff.files().is_empty() {
-        return c.child(col().w_full().grow(1.0).center().child(text("No changes").font(k.ty.ui).color(k.c.text_muted)));
+        return c.child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .center()
+                .child(text("No changes").font(k.ty.ui).color(k.c.text_muted)),
+        );
     }
     let mut dv = DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff);
     if matches!(target, Target::Pr(..)) {
         let kc = k.clone();
-        dv = dv.on_comment(|s: &mut App, lines, _| s.open_composer(lines)).header_actions(move |s: &App, i| {
-            Checkbox::new(s.is_viewed(i)).label("Viewed").on_toggle(move |s: &mut App| s.toggle_viewed(i)).build(&kc)
-        });
+        dv = dv
+            .on_comment(|s: &mut App, lines, _| s.open_composer(lines))
+            .header_actions(move |s: &App, i| {
+                Checkbox::new(s.is_viewed(i))
+                    .label("Viewed")
+                    .on_toggle(move |s: &mut App| s.toggle_viewed(i))
+                    .build(&kc)
+            });
     }
     let kc = k.clone();
     dv = dv.annotation(move |s: &App, a: &Annotation| annotation(s, &kc, a));
@@ -1133,35 +1410,53 @@ fn main_pane(s: &App, k: &Kit) -> El {
             s.files.select(&path);
         }
     });
-    let body = row().w_full().grow(1.0).min_h(0.0).child(file_tree(s, k)).child(col().grow(1.0).h_full().min_w(0.0).child(dv.build(s, k)));
+    let body = row()
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(file_tree(s, k))
+        .child(col().grow(1.0).h_full().min_w(0.0).child(dv.build(s, k)));
     c.child(body)
 }
 
 fn file_tree(s: &App, k: &Kit) -> El {
-    let stats: Vec<(u32, u32, bool)> =
-        s.diff.files().iter().enumerate().map(|(i, f)| (f.additions() as u32, f.deletions() as u32, s.is_viewed(i))).collect();
+    let stats: Vec<(u32, u32, bool)> = s
+        .diff
+        .files()
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.additions() as u32, f.deletions() as u32, s.is_viewed(i)))
+        .collect();
     let check = k.c.success.icon;
     let ty = k.ty.small_medium;
-    let tree = Tree::new(|s: &App| &s.files, |s: &mut App| &mut s.files, |n: &FileNode<usize>| n.name.as_str())
-        .name("Changed files")
-        .row(move |n, r| {
-            let item = TreeItem::file(n, r);
-            match n.data.and_then(|i| stats.get(i)) {
-                Some(&(a, d, viewed)) => {
-                    let item = item.changes(a, d);
-                    if viewed { item.trailing(text("✓").font(ty).color(check)) } else { item }
+    let tree = Tree::new(
+        |s: &App| &s.files,
+        |s: &mut App| &mut s.files,
+        |n: &FileNode<usize>| n.name.as_str(),
+    )
+    .name("Changed files")
+    .row(move |n, r| {
+        let item = TreeItem::file(n, r);
+        match n.data.and_then(|i| stats.get(i)) {
+            Some(&(a, d, viewed)) => {
+                let item = item.changes(a, d);
+                if viewed {
+                    item.trailing(text("✓").font(ty).color(check))
+                } else {
+                    item
                 }
-                None => item,
             }
-        })
-        .on_select(|s: &mut App, path: &str, tx: &mut Tx| {
-            if let Some(i) = s.diff.file_index(path) {
-                s.diff.scroll_to_file(i, tx);
-            }
-        })
-        .build(s, k)
-        .grow(1.0)
-        .min_h(0.0);
+            None => item,
+        }
+    })
+    .on_select(|s: &mut App, path: &str, tx: &mut Tx| {
+        if let Some(i) = s.diff.file_index(path) {
+            s.diff.scroll_to_file(i, tx);
+        }
+    })
+    .build(s, k)
+    .grow(1.0)
+    .min_h(0.0);
     col()
         .key("file-tree")
         .w(260.0)
@@ -1169,22 +1464,50 @@ fn file_tree(s: &App, k: &Kit) -> El {
         .padding(8.0)
         .gap(6.0)
         .border_sides([0.0, 1.0, 0.0, 0.0], k.c.border_muted)
-        .child(text(format!("{} changed files", s.diff.files().len())).font(k.ty.small_medium).color(k.c.text_muted).px(6.0).py(4.0))
+        .child(
+            text(format!("{} changed files", s.diff.files().len()))
+                .font(k.ty.small_medium)
+                .color(k.c.text_muted)
+                .px(6.0)
+                .py(4.0),
+        )
         .child(tree)
 }
 
 fn annotation(s: &App, k: &Kit, a: &Annotation) -> El {
     let frame = |inner: El| col().w_full().px(12.0).py(6.0).child(inner);
-    let card = || col().w_full().gap(8.0).padding(10.0).radius(8.0).fill(k.c.layer_01).border(1.0, k.c.border_muted);
+    let card = || {
+        col()
+            .w_full()
+            .gap(8.0)
+            .padding(10.0)
+            .radius(8.0)
+            .fill(k.c.layer_01)
+            .border(1.0, k.c.border_muted)
+    };
     if a.id == "compose" {
-        let Some((_, edit)) = &s.composing else { return col() };
+        let Some((_, edit)) = &s.composing else {
+            return col();
+        };
         let empty = edit.text.trim().is_empty();
         let actions = row()
             .w_full()
             .gap(8.0)
             .child(row().grow(1.0))
-            .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).on_press(|s: &mut App| s.close_composer()).build(k))
-            .child(Button::new("Ask agent").variant(ButtonVariant::Outline).control_size(ControlSize::Small).on_press(|s: &mut App| s.composer_to_agent()).build(k))
+            .child(
+                Button::new("Cancel")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.close_composer())
+                    .build(k),
+            )
+            .child(
+                Button::new("Ask agent")
+                    .variant(ButtonVariant::Outline)
+                    .control_size(ControlSize::Small)
+                    .on_press(|s: &mut App| s.composer_to_agent())
+                    .build(k),
+            )
             .child(
                 Button::new("Add review comment")
                     .variant(ButtonVariant::Contrast)
@@ -1210,23 +1533,51 @@ fn annotation(s: &App, k: &Kit, a: &Annotation) -> El {
                 false
             })
             .build(k);
-        return frame(card().border(1.0, k.c.border_focus).child(input).child(actions));
+        return frame(
+            card()
+                .border(1.0, k.c.border_focus)
+                .child(input)
+                .child(actions),
+        );
     }
-    if let Some(i) = a.id.strip_prefix("d:").and_then(|i| i.parse::<usize>().ok()) {
-        let Some(d) = s.drafts().get(i) else { return col() };
+    if let Some(i) =
+        a.id.strip_prefix("d:")
+            .and_then(|i| i.parse::<usize>().ok())
+    {
+        let Some(d) = s.drafts().get(i) else {
+            return col();
+        };
         let head = row()
             .w_full()
             .gap(8.0)
             .items_center()
             .child(Badge::new("Pending").variant(BadgeVariant::Accent).build(k))
-            .child(text("Your review comment").font(k.ty.small_medium).color(k.c.text_muted))
+            .child(
+                text("Your review comment")
+                    .font(k.ty.small_medium)
+                    .color(k.c.text_muted),
+            )
             .child(row().grow(1.0))
-            .child(Button::new("Delete").variant(ButtonVariant::GhostFaint).control_size(ControlSize::Small).on_press(move |s: &mut App| s.remove_draft(i)).build(k));
-        return frame(card().child(head).child(Markdown::new(d.body.clone()).selectable(true).build(k)));
+            .child(
+                Button::new("Delete")
+                    .variant(ButtonVariant::GhostFaint)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.remove_draft(i))
+                    .build(k),
+            );
+        return frame(
+            card()
+                .child(head)
+                .child(Markdown::new(d.body.clone()).selectable(true).build(k)),
+        );
     }
     let Some(d) = &s.detail else { return col() };
     let mut thread = card();
-    for id in a.id.trim_start_matches("c:").split(',').filter_map(|i| i.parse::<usize>().ok()) {
+    for id in
+        a.id.trim_start_matches("c:")
+            .split(',')
+            .filter_map(|i| i.parse::<usize>().ok())
+    {
         if let Some(c) = d.comments.get(id) {
             thread = thread.child(comment_card(k, c, false));
         }
@@ -1239,8 +1590,16 @@ fn comment_card(k: &Kit, c: &Comment, show_path: bool) -> El {
         .w_full()
         .gap(8.0)
         .items_center()
-        .child(text(format!("@{}", c.author)).font(k.ty.small_medium).color(k.c.text_base))
-        .child(text(c.created.get(..10).unwrap_or("").to_string()).font(k.ty.small).color(k.c.text_faint));
+        .child(
+            text(format!("@{}", c.author))
+                .font(k.ty.small_medium)
+                .color(k.c.text_base),
+        )
+        .child(
+            text(c.created.get(..10).unwrap_or("").to_string())
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        );
     if let Some(state) = &c.review_state {
         let (label, v) = match state.as_str() {
             "APPROVED" => ("approved", BadgeVariant::Accent),
@@ -1249,44 +1608,101 @@ fn comment_card(k: &Kit, c: &Comment, show_path: bool) -> El {
         };
         head = head.child(Badge::new(label).variant(v).build(k));
     }
-    if show_path
-        && let (Some(path), Some(line)) = (&c.path, c.line) {
-            head = head.child(text(format!("{path}:{line}")).font(k.ty.mono).color(k.c.text_muted).truncate().shrink());
-        }
+    if show_path && let (Some(path), Some(line)) = (&c.path, c.line) {
+        head = head.child(
+            text(format!("{path}:{line}"))
+                .font(k.ty.mono)
+                .color(k.c.text_muted)
+                .truncate()
+                .shrink(),
+        );
+    }
     let mut card = col().w_full().gap(4.0).child(head);
     if !c.body.trim().is_empty() {
         card = card.child(Markdown::new(c.body.clone()).selectable(true).build(k));
     }
     if c.reply {
-        card = card.pl(12.0).border_sides([0.0, 0.0, 0.0, 2.0], k.c.border_muted);
+        card = card
+            .pl(12.0)
+            .border_sides([0.0, 0.0, 0.0, 2.0], k.c.border_muted);
     }
     card
 }
 
 fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
-    let (adds, dels) = s.diff.files().iter().fold((0, 0), |(a, d), f| (a + f.additions(), d + f.deletions()));
+    let (adds, dels) = s
+        .diff
+        .files()
+        .iter()
+        .fold((0, 0), |(a, d), f| (a + f.additions(), d + f.deletions()));
     let mut meta = row()
         .gap(8.0)
         .items_center()
-        .child(text(format!("@{}", pr.author)).font(k.ty.small_medium).color(k.c.text_base))
-        .child(text(format!("{} → {}", pr.head_ref, pr.base_ref)).font(k.ty.small).color(k.c.text_muted))
-        .child(text(format!("+{adds} −{dels} · {} files", s.diff.files().len())).font(k.ty.small).color(k.c.text_faint))
+        .child(
+            text(format!("@{}", pr.author))
+                .font(k.ty.small_medium)
+                .color(k.c.text_base),
+        )
+        .child(
+            text(format!("{} → {}", pr.head_ref, pr.base_ref))
+                .font(k.ty.small)
+                .color(k.c.text_muted),
+        )
+        .child(
+            text(format!("+{adds} −{dels} · {} files", s.diff.files().len()))
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        )
         .child({
             let n = s.diff.files().len();
             let done = (0..n).filter(|i| s.is_viewed(*i)).count();
-            let ink = if n > 0 && done == n { k.c.success.fg } else { k.c.text_muted };
-            text(format!("{done}/{n} viewed")).font(k.ty.small_medium).color(ink)
+            let ink = if n > 0 && done == n {
+                k.c.success.fg
+            } else {
+                k.c.text_muted
+            };
+            text(format!("{done}/{n} viewed"))
+                .font(k.ty.small_medium)
+                .color(ink)
         })
-        .child(Badge::new(pr.review.label()).variant(if pr.review == ReviewState::Approved { BadgeVariant::Accent } else { BadgeVariant::Neutral }).build(k));
+        .child(
+            Badge::new(pr.review.label())
+                .variant(if pr.review == ReviewState::Approved {
+                    BadgeVariant::Accent
+                } else {
+                    BadgeVariant::Neutral
+                })
+                .build(k),
+        );
     if pr.is_draft {
         meta = meta.child(Badge::new("draft").variant(BadgeVariant::Subtle).build(k));
     }
     if let Some(d) = &s.detail {
-        let fail = d.checks.iter().filter(|c| c.1 == model::CheckResult::Fail).count();
-        let pend = d.checks.iter().filter(|c| c.1 == model::CheckResult::Pending).count();
+        let fail = d
+            .checks
+            .iter()
+            .filter(|c| c.1 == model::CheckResult::Fail)
+            .count();
+        let pend = d
+            .checks
+            .iter()
+            .filter(|c| c.1 == model::CheckResult::Pending)
+            .count();
         if !d.checks.is_empty() {
-            let label = if fail > 0 { format!("CI: {fail} failing") } else if pend > 0 { format!("CI: {pend} pending") } else { "CI passing".into() };
-            meta = meta.child(text(label).font(k.ty.small).color(if fail > 0 { k.c.danger.fg } else if pend > 0 { k.c.warning.fg } else { k.c.success.fg }));
+            let label = if fail > 0 {
+                format!("CI: {fail} failing")
+            } else if pend > 0 {
+                format!("CI: {pend} pending")
+            } else {
+                "CI passing".into()
+            };
+            meta = meta.child(text(label).font(k.ty.small).color(if fail > 0 {
+                k.c.danger.fg
+            } else if pend > 0 {
+                k.c.warning.fg
+            } else {
+                k.c.success.fg
+            }));
         }
     }
     let mut h = col()
@@ -1295,14 +1711,26 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .py(12.0)
         .gap(6.0)
         .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted)
-        .child(text(pr.title.clone()).font(k.ty.body_medium).color(k.c.text_base).wrap())
+        .child(
+            text(pr.title.clone())
+                .font(k.ty.body_medium)
+                .color(k.c.text_base)
+                .wrap(),
+        )
         .child(meta);
-    if let Some(body) = s.detail.as_ref().map(|d| d.body.trim()).filter(|b| !b.is_empty()) {
+    if let Some(body) = s
+        .detail
+        .as_ref()
+        .map(|d| d.body.trim())
+        .filter(|b| !b.is_empty())
+    {
         h = h.child(
             col()
                 .w_full()
                 .max_h(180.0)
-                .scroll(ScrollSpec { stick_bottom: false })
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
                 .child(Markdown::new(body.to_string()).selectable(true).build(k)),
         );
     }
@@ -1310,7 +1738,9 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
 }
 
 fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
-    let Some(repo) = s.repos.get(slug) else { return col() };
+    let Some(repo) = s.repos.get(slug) else {
+        return col();
+    };
     let mut list = col().w_full().gap(2.0).padding(12.0);
     let line = |label: String, detail: String, extra: Option<El>, on: OnRow| {
         let mut r = row()
@@ -1320,7 +1750,13 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
             .gap(10.0)
             .radius(6.0)
             .items_center()
-            .child(text(label).font(k.ty.ui).color(k.c.text_base).truncate().grow(1.0))
+            .child(
+                text(label)
+                    .font(k.ty.ui)
+                    .color(k.c.text_base)
+                    .truncate()
+                    .grow(1.0),
+            )
             .child(text(detail).font(k.ty.small).color(k.c.text_faint));
         if let Some(e) = extra {
             r = r.child(e);
@@ -1330,19 +1766,41 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
     match kind {
         Browse::Branches => {
             list = list.child(
-                text(format!("Branches compared with origin/{}", repo.default_branch)).font(k.ty.ui_medium).color(k.c.text_muted).py(6.0),
+                text(format!(
+                    "Branches compared with origin/{}",
+                    repo.default_branch
+                ))
+                .font(k.ty.ui_medium)
+                .color(k.c.text_muted)
+                .py(6.0),
             );
             for b in &repo.branches {
                 let t = Target::Branch(slug.into(), b.clone());
-                list = list.child(line(b.clone(), String::new(), None, Box::new(move |s, tx| s.open(t.clone(), tx))).key(format!("br/{b}")));
+                list = list.child(
+                    line(
+                        b.clone(),
+                        String::new(),
+                        None,
+                        Box::new(move |s, tx| s.open(t.clone(), tx)),
+                    )
+                    .key(format!("br/{b}")),
+                );
             }
         }
         Browse::Commits => {
             let hint = match &s.range_base {
                 Some(b) => format!("Range base {} — pick the head commit", &b[..8.min(b.len())]),
-                None => format!("Commits on origin/{} — “Base” starts a range", repo.default_branch),
+                None => format!(
+                    "Commits on origin/{} — “Base” starts a range",
+                    repo.default_branch
+                ),
             };
-            list = list.child(text(hint).font(k.ty.ui_medium).color(k.c.text_muted).py(6.0));
+            list = list.child(
+                text(hint)
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_muted)
+                    .py(6.0),
+            );
             for c in &repo.commits {
                 let (slug2, sha, sha2) = (slug.to_string(), c.sha.clone(), c.sha.clone());
                 let is_base = s.range_base.as_deref() == Some(c.sha.as_str());
@@ -1350,7 +1808,11 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
                     .variant(ButtonVariant::GhostFaint)
                     .control_size(ControlSize::Small)
                     .on_press(move |s: &mut App| {
-                        s.range_base = if s.range_base.as_deref() == Some(sha2.as_str()) { None } else { Some(sha2.clone()) };
+                        s.range_base = if s.range_base.as_deref() == Some(sha2.as_str()) {
+                            None
+                        } else {
+                            Some(sha2.clone())
+                        };
                     })
                     .build(k);
                 list = list.child(
@@ -1371,20 +1833,31 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
             }
         }
     }
-    col().w_full().h_full().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list)
+    col()
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(list)
 }
 
 fn inspector(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     if !matches!(s.target, Some(Target::Pr(..))) {
-        return col()
-            .w_full()
-            .h_full()
-            .padding(16.0)
-            .center()
-            .child(text("Open a pull request to talk to the agent about it or review it.").font(k.ty.ui).color(k.c.text_muted).wrap());
+        return col().w_full().h_full().padding(16.0).center().child(
+            text("Open a pull request to talk to the agent about it or review it.")
+                .font(k.ty.ui)
+                .color(k.c.text_muted)
+                .wrap(),
+        );
     }
     let count = s.detail.as_ref().map_or(0, |d| d.comments.len());
-    let comments_label = if count > 0 { format!("Comments ({count})") } else { "Comments".to_string() };
+    let comments_label = if count > 0 {
+        format!("Comments ({count})")
+    } else {
+        "Comments".to_string()
+    };
     let labels = ["Agent".to_string(), comments_label, "Review".to_string()];
     let current = match s.panel {
         Panel::Agent => 0,
@@ -1403,7 +1876,12 @@ fn inspector(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         Panel::Comments => comments_panel(s, k),
         Panel::Review => review_panel(s, k),
     };
-    col().w_full().h_full().min_h(0.0).child(row().w_full().px(12.0).py(8.0).child(tabs)).child(body)
+    col()
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .child(row().w_full().px(12.0).py(8.0).child(tabs))
+        .child(body)
 }
 
 fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -1413,7 +1891,12 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 
     let mut transcript = col().w_full().gap(10.0).padding(12.0);
     if let Some(e) = &s.oc_error {
-        transcript = transcript.child(text(format!("opencode unavailable: {e}")).font(k.ty.small).color(k.c.danger.fg).wrap());
+        transcript = transcript.child(
+            text(format!("opencode unavailable: {e}"))
+                .font(k.ty.small)
+                .color(k.c.danger.fg)
+                .wrap(),
+        );
     }
     match snap {
         None if id.is_none() => {
@@ -1440,7 +1923,13 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 transcript = transcript.child(permission(k, p));
             }
             if running {
-                transcript = transcript.child(row().gap(8.0).items_center().child(Spinner::new().build(k)).child(text("Working…").font(k.ty.small).color(k.c.text_faint)));
+                transcript = transcript.child(
+                    row()
+                        .gap(8.0)
+                        .items_center()
+                        .child(Spinner::new().build(k))
+                        .child(text("Working…").font(k.ty.small).color(k.c.text_faint)),
+                );
             }
         }
     }
@@ -1457,21 +1946,38 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         );
     }
     let current = s.store.model.as_ref().map(ModelRef::key);
-    let model = Combobox::new("model", &s.model_combo, &s.models, |s: &mut App| &mut s.model_combo)
-        .label("Model")
-        .current(current.as_deref())
-        .placeholder(if s.models.is_empty() { "Loading models…" } else { "opencode default model" })
-        .search_placeholder("Search models")
-        .width(240.0)
-        .max_height(320.0)
-        .placement(rune_kit::Placement::TopStart)
-        .disabled(s.models.is_empty())
-        .on_choose(|s: &mut App, id: &str, _: &mut Tx| s.choose_model(id))
-        .build(k, layer);
-    let model_row = row().w_full().gap(8.0).items_center().child(text("Model").font(k.ty.small_medium).color(k.c.text_muted)).child(model);
+    let model = Combobox::new("model", &s.model_combo, &s.models, |s: &mut App| {
+        &mut s.model_combo
+    })
+    .label("Model")
+    .current(current.as_deref())
+    .placeholder(if s.models.is_empty() {
+        "Loading models…"
+    } else {
+        "opencode default model"
+    })
+    .search_placeholder("Search models")
+    .width(240.0)
+    .max_height(320.0)
+    .placement(rune_kit::Placement::TopStart)
+    .disabled(s.models.is_empty())
+    .on_choose(|s: &mut App, id: &str, _: &mut Tx| s.choose_model(id))
+    .build(k, layer);
+    let model_row = row()
+        .w_full()
+        .gap(8.0)
+        .items_center()
+        .child(text("Model").font(k.ty.small_medium).color(k.c.text_muted))
+        .child(model);
     let mut actions = row().gap(6.0).items_center().child(row().grow(1.0));
     if id.is_some() {
-        actions = actions.child(Button::new("Open in terminal").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).on_press(|s: &mut App| s.open_terminal()).build(k));
+        actions = actions.child(
+            Button::new("Open in terminal")
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .on_press(|s: &mut App| s.open_terminal())
+                .build(k),
+        );
     }
     if running {
         actions = actions.child(
@@ -1499,7 +2005,9 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(presets)
         .child(
             TextArea::new(&s.composer)
-                .placeholder("Ask the agent about this PR… (Enter to send, Shift-Enter for a newline)")
+                .placeholder(
+                    "Ask the agent about this PR… (Enter to send, Shift-Enter for a newline)",
+                )
                 .auto_grow(3, 12)
                 .width(None)
                 .on_edit(|s: &mut App| &mut s.composer)
@@ -1511,7 +2019,14 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(transcript))
+        .child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(ScrollSpec { stick_bottom: true })
+                .child(transcript),
+        )
         .child(composer)
 }
 
@@ -1524,19 +2039,48 @@ fn entry(k: &Kit, e: &Entry) -> El {
                 .py(8.0)
                 .radius(10.0)
                 .fill(k.c.bg_accent)
-                .child(text(t.clone()).font(k.ty.body).color(k.c.text_base).wrap().selectable(true)),
+                .child(
+                    text(t.clone())
+                        .font(k.ty.body)
+                        .color(k.c.text_base)
+                        .wrap()
+                        .selectable(true),
+                ),
         ),
-        Entry::Text(t) => col().w_full().child(Markdown::new(t.clone()).selectable(true).build(k)),
-        Entry::Reasoning(t) => text(t.clone()).font(k.ty.small).color(k.c.text_faint).wrap().max_lines(3),
-        Entry::Tool { name, summary, status } => {
-            let ink = if status == "error" { k.c.danger.fg } else { k.c.text_muted };
+        Entry::Text(t) => col()
+            .w_full()
+            .child(Markdown::new(t.clone()).selectable(true).build(k)),
+        Entry::Reasoning(t) => text(t.clone())
+            .font(k.ty.small)
+            .color(k.c.text_faint)
+            .wrap()
+            .max_lines(3),
+        Entry::Tool {
+            name,
+            summary,
+            status,
+        } => {
+            let ink = if status == "error" {
+                k.c.danger.fg
+            } else {
+                k.c.text_muted
+            };
             row()
                 .w_full()
                 .gap(6.0)
                 .child(text(format!("▸ {name}")).font(k.ty.small_medium).color(ink))
-                .child(text(summary.clone()).font(k.ty.mono).color(k.c.text_faint).truncate().grow(1.0))
+                .child(
+                    text(summary.clone())
+                        .font(k.ty.mono)
+                        .color(k.c.text_faint)
+                        .truncate()
+                        .grow(1.0),
+                )
         }
-        Entry::Shell { command, status } => text(format!("$ {command}  ({status})")).font(k.ty.mono).color(k.c.text_muted).truncate(),
+        Entry::Shell { command, status } => text(format!("$ {command}  ({status})"))
+            .font(k.ty.mono)
+            .color(k.c.text_muted)
+            .truncate(),
         Entry::Error(e) => text(e.clone()).font(k.ty.small).color(k.c.danger.fg).wrap(),
     }
 }
@@ -1553,14 +2097,23 @@ fn permission(k: &Kit, p: &opencode::Permission) -> El {
             })
             .build(k)
     };
-    let what = if p.message.is_empty() { format!("{}: {}", p.action, p.resources.join(", ")) } else { p.message.clone() };
+    let what = if p.message.is_empty() {
+        format!("{}: {}", p.action, p.resources.join(", "))
+    } else {
+        p.message.clone()
+    };
     col()
         .w_full()
         .padding(10.0)
         .gap(8.0)
         .radius(8.0)
         .fill(k.c.warning.bg)
-        .child(text(format!("Permission requested — {what}")).font(k.ty.ui).color(k.c.warning.fg).wrap())
+        .child(
+            text(format!("Permission requested — {what}"))
+                .font(k.ty.ui)
+                .color(k.c.warning.fg)
+                .wrap(),
+        )
         .child(
             row()
                 .gap(6.0)
@@ -1580,13 +2133,22 @@ fn comments_panel(s: &App, k: &Kit) -> El {
         }
         Some(d) => {
             for (i, c) in d.comments.iter().enumerate() {
-                let mut card = col().w_full().padding(10.0).radius(8.0).fill(k.c.layer_01).child(comment_card(k, c, true));
+                let mut card = col()
+                    .w_full()
+                    .padding(10.0)
+                    .radius(8.0)
+                    .fill(k.c.layer_01)
+                    .child(comment_card(k, c, true));
                 if let (Some(path), Some(line)) = (c.path.clone(), c.line) {
                     let left = c.left;
                     card = k.interactive(card.on_press_tx(move |s: &mut App, tx| {
                         if let Some(f) = s.diff.file_index(&path) {
                             s.diff.set_collapsed(f, false);
-                            s.diff.scroll_to_line(f, LineRef::new(if left { Side::Old } else { Side::New }, line), tx);
+                            s.diff.scroll_to_line(
+                                f,
+                                LineRef::new(if left { Side::Old } else { Side::New }, line),
+                                tx,
+                            );
                         }
                     }));
                 }
@@ -1597,13 +2159,25 @@ fn comments_panel(s: &App, k: &Kit) -> El {
     let target = s.diff.selection().and_then(|r| {
         let f = s.diff.files().get(r.file)?;
         let (a, b) = (r.start.line.min(r.end.line), r.start.line.max(r.end.line));
-        Some(if a == b { format!("{}:{a}", f.path()) } else { format!("{}:{a}-{b}", f.path()) })
+        Some(if a == b {
+            format!("{}:{a}", f.path())
+        } else {
+            format!("{}:{a}-{b}", f.path())
+        })
     });
     let hint = match &target {
         Some(t) => format!("Commenting on {t}"),
-        None => "Commenting on the PR. Click line numbers in the diff to comment on lines.".to_string(),
+        None => {
+            "Commenting on the PR. Click line numbers in the diff to comment on lines.".to_string()
+        }
     };
-    let mut actions = row().w_full().gap(8.0).items_center().child(text(hint).font(k.ty.small).color(k.c.text_muted).wrap().grow(1.0));
+    let mut actions = row().w_full().gap(8.0).items_center().child(
+        text(hint)
+            .font(k.ty.small)
+            .color(k.c.text_muted)
+            .wrap()
+            .grow(1.0),
+    );
     if target.is_some() {
         actions = actions.child(
             Button::new("Clear lines")
@@ -1639,14 +2213,25 @@ fn comments_panel(s: &App, k: &Kit) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(list))
+        .child(
+            col()
+                .w_full()
+                .grow(1.0)
+                .min_h(0.0)
+                .scroll(ScrollSpec { stick_bottom: true })
+                .child(list),
+        )
         .child(composer)
 }
 
 fn review_panel(s: &App, k: &Kit) -> El {
     let drafts = s.drafts();
     let btn = |label: &'static str, kind: ReviewKind, v: ButtonVariant| {
-        Button::new(label).variant(v).disabled(s.busy).on_press(move |s: &mut App| s.submit_review(kind)).build(k)
+        Button::new(label)
+            .variant(v)
+            .disabled(s.busy)
+            .on_press(move |s: &mut App| s.submit_review(kind))
+            .build(k)
     };
     let mut pending = col().w_full().gap(6.0);
     if drafts.is_empty() {
@@ -1658,7 +2243,11 @@ fn review_panel(s: &App, k: &Kit) -> El {
         );
     }
     for (i, d) in drafts.iter().enumerate() {
-        let at = if d.start == d.end { format!("{}:{}", d.path, d.end) } else { format!("{}:{}-{}", d.path, d.start, d.end) };
+        let at = if d.start == d.end {
+            format!("{}:{}", d.path, d.end)
+        } else {
+            format!("{}:{}-{}", d.path, d.start, d.end)
+        };
         let (path, line, left) = (d.path.clone(), d.end, d.left);
         let item = row()
             .w_full()
@@ -1674,23 +2263,44 @@ fn review_panel(s: &App, k: &Kit) -> El {
                     .min_w(0.0)
                     .gap(2.0)
                     .child(text(at).font(k.ty.mono).color(k.c.text_muted).truncate())
-                    .child(text(d.body.clone()).font(k.ty.ui).color(k.c.text_base).max_lines(2)),
+                    .child(
+                        text(d.body.clone())
+                            .font(k.ty.ui)
+                            .color(k.c.text_base)
+                            .max_lines(2),
+                    ),
             )
-            .child(Button::new("Delete").variant(ButtonVariant::GhostFaint).control_size(ControlSize::Small).on_press(move |s: &mut App| s.remove_draft(i)).build(k))
+            .child(
+                Button::new("Delete")
+                    .variant(ButtonVariant::GhostFaint)
+                    .control_size(ControlSize::Small)
+                    .on_press(move |s: &mut App| s.remove_draft(i))
+                    .build(k),
+            )
             .on_press_tx(move |s: &mut App, tx| {
                 if let Some(f) = s.diff.file_index(&path) {
                     s.diff.set_collapsed(f, false);
-                    s.diff.scroll_to_line(f, LineRef::new(if left { Side::Old } else { Side::New }, line), tx);
+                    s.diff.scroll_to_line(
+                        f,
+                        LineRef::new(if left { Side::Old } else { Side::New }, line),
+                        tx,
+                    );
                 }
             });
         pending = pending.child(k.interactive(item).key(format!("draft{i}")));
     }
-    let title = if drafts.is_empty() { "Line comments".to_string() } else { format!("Line comments ({} pending)", drafts.len()) };
+    let title = if drafts.is_empty() {
+        "Line comments".to_string()
+    } else {
+        format!("Line comments ({} pending)", drafts.len())
+    };
     col()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .scroll(ScrollSpec { stick_bottom: false })
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
         .child(
             col()
                 .w_full()
@@ -1698,34 +2308,69 @@ fn review_panel(s: &App, k: &Kit) -> El {
                 .gap(10.0)
                 .child(text(title).font(k.ty.ui_medium).color(k.c.text_muted))
                 .child(pending)
-                .child(text("Review summary (markdown)").font(k.ty.ui_medium).color(k.c.text_muted).pt(6.0))
-                .child(TextArea::new(&s.review).placeholder("Leave a review…").rows(10).width(None).on_edit(|s: &mut App| &mut s.review).build(k))
+                .child(
+                    text("Review summary (markdown)")
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_muted)
+                        .pt(6.0),
+                )
+                .child(
+                    TextArea::new(&s.review)
+                        .placeholder("Leave a review…")
+                        .rows(10)
+                        .width(None)
+                        .on_edit(|s: &mut App| &mut s.review)
+                        .build(k),
+                )
                 .child(
                     row()
                         .gap(8.0)
                         .child(btn("Comment", ReviewKind::Comment, ButtonVariant::Outline))
                         .child(btn("Approve", ReviewKind::Approve, ButtonVariant::Submit))
-                        .child(btn("Request changes", ReviewKind::RequestChanges, ButtonVariant::Danger)),
+                        .child(btn(
+                            "Request changes",
+                            ReviewKind::RequestChanges,
+                            ButtonVariant::Danger,
+                        )),
                 ),
         )
 }
 
 /// A dialog sized to its content, with a padded body and right-aligned actions.
-fn modal(key: &str, title: &str, description: Option<&str>, body: Vec<El>, actions: Vec<El>, k: &Kit, layer: &mut Vec<El>) {
+fn modal(
+    key: &str,
+    title: &str,
+    description: Option<&str>,
+    body: Vec<El>,
+    actions: Vec<El>,
+    k: &Kit,
+    layer: &mut Vec<El>,
+) {
     let mut footer = row().w_full().gap(8.0).pt(4.0).child(row().grow(1.0));
     for a in actions {
         footer = footer.child(a);
     }
     let mut content = col().w_full().px(16.0).pb(16.0).gap(12.0);
     if let Some(desc) = description {
-        content = content.child(text(desc.to_string()).font(k.ty.ui).color(k.c.text_muted).wrap().mt(-6.0));
+        content = content.child(
+            text(desc.to_string())
+                .font(k.ty.ui)
+                .color(k.c.text_muted)
+                .wrap()
+                .mt(-6.0),
+        );
     }
     let content = content.children(body).child(footer);
-    Dialog::new(key, title).open(true).fit().width(460.0).child(content).on_close(|s: &mut App| {
-        s.add_repo = None;
-        s.confirm = None;
-    })
-    .build(k, layer);
+    Dialog::new(key, title)
+        .open(true)
+        .fit()
+        .width(460.0)
+        .child(content)
+        .on_close(|s: &mut App| {
+            s.add_repo = None;
+            s.confirm = None;
+        })
+        .build(k, layer);
 }
 
 fn cancel(k: &Kit) -> El {
@@ -1746,7 +2391,10 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
             .on_edit(|s: &mut App| s.add_repo.as_mut().expect("dialog open"))
             .on_submit(|s: &mut App, _| s.add_repo())
             .build(k);
-        let add = Button::new("Add").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.add_repo()).build(k);
+        let add = Button::new("Add")
+            .variant(ButtonVariant::Contrast)
+            .on_press(|s: &mut App| s.add_repo())
+            .build(k);
         modal(
             "add-repo",
             "Add repository",
@@ -1761,17 +2409,50 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
         Some(Confirm::Draft(draft)) => {
             let draft = *draft;
             let (title, desc) = if draft {
-                ("Convert to draft?", "Reviewers won't be asked to review it until it's marked ready again.")
+                (
+                    "Convert to draft?",
+                    "Reviewers won't be asked to review it until it's marked ready again.",
+                )
             } else {
-                ("Mark ready for review?", "Requested reviewers will be notified.")
+                (
+                    "Mark ready for review?",
+                    "Requested reviewers will be notified.",
+                )
             };
-            let ok = Button::new("Confirm").variant(ButtonVariant::Contrast).on_press(move |s: &mut App| s.set_draft(draft)).build(k);
-            modal("draft", title, Some(desc), vec![], vec![cancel(k), ok], k, layer);
+            let ok = Button::new("Confirm")
+                .variant(ButtonVariant::Contrast)
+                .on_press(move |s: &mut App| s.set_draft(draft))
+                .build(k);
+            modal(
+                "draft",
+                title,
+                Some(desc),
+                vec![],
+                vec![cancel(k), ok],
+                k,
+                layer,
+            );
         }
         Some(Confirm::Merge(r)) => {
             let Some(r) = r else {
-                let wait = row().gap(10.0).items_center().child(Spinner::new().build(k)).child(text("Checking CI and merge rules…").font(k.ty.ui).color(k.c.text_muted));
-                modal("merge", "Merge pull request", None, vec![wait], vec![cancel(k)], k, layer);
+                let wait = row()
+                    .gap(10.0)
+                    .items_center()
+                    .child(Spinner::new().build(k))
+                    .child(
+                        text("Checking CI and merge rules…")
+                            .font(k.ty.ui)
+                            .color(k.c.text_muted),
+                    );
+                modal(
+                    "merge",
+                    "Merge pull request",
+                    None,
+                    vec![wait],
+                    vec![cancel(k)],
+                    k,
+                    layer,
+                );
                 return;
             };
             let line = |l: &str, v: &str, ok: bool, warn: bool| {
@@ -1779,9 +2460,24 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
                     .w_full()
                     .gap(8.0)
                     .items_center()
-                    .child(text(l.to_string()).font(k.ty.ui).color(k.c.text_muted).w(80.0))
-                    .child(el().size(8.0, 8.0).radius(4.0).fill(if ok { k.c.success.icon } else if warn { k.c.warning.icon } else { k.c.danger.icon }))
-                    .child(text(v.to_string()).font(k.ty.ui_medium).color(k.c.text_base))
+                    .child(
+                        text(l.to_string())
+                            .font(k.ty.ui)
+                            .color(k.c.text_muted)
+                            .w(80.0),
+                    )
+                    .child(el().size(8.0, 8.0).radius(4.0).fill(if ok {
+                        k.c.success.icon
+                    } else if warn {
+                        k.c.warning.icon
+                    } else {
+                        k.c.danger.icon
+                    }))
+                    .child(
+                        text(v.to_string())
+                            .font(k.ty.ui_medium)
+                            .color(k.c.text_base),
+                    )
             };
             let mut status = col()
                 .w_full()
@@ -1789,19 +2485,52 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 .padding(12.0)
                 .radius(6.0)
                 .fill(k.c.bg_base)
-                .child(line("Review", if r.approved { "approved" } else { "not approved" }, r.approved, false))
-                .child(line("CI", &r.ci_label, r.ci_ok, r.ci_label.starts_with("pending")))
+                .child(line(
+                    "Review",
+                    if r.approved {
+                        "approved"
+                    } else {
+                        "not approved"
+                    },
+                    r.approved,
+                    false,
+                ))
+                .child(line(
+                    "CI",
+                    &r.ci_label,
+                    r.ci_ok,
+                    r.ci_label.starts_with("pending"),
+                ))
                 .child(line("Merge", &r.merge_label, r.merge_ok, false));
             if !r.problems.is_empty() {
                 let mut list = col().gap(4.0).pt(4.0);
                 for p in &r.problems {
-                    list = list.child(text(format!("• {p}")).font(k.ty.small).color(k.c.text_muted));
+                    list = list.child(
+                        text(format!("• {p}"))
+                            .font(k.ty.small)
+                            .color(k.c.text_muted),
+                    );
                 }
                 status = status.child(list);
             }
-            let label = r.method.map(|m| format!("Merge ({})", m.label())).unwrap_or_else(|| "Merge".into());
-            let go = Button::new(label).variant(ButtonVariant::Contrast).disabled(!r.can_merge()).on_press(|s: &mut App| s.merge()).build(k);
-            modal("merge", "Merge pull request", None, vec![status], vec![cancel(k), go], k, layer);
+            let label = r
+                .method
+                .map(|m| format!("Merge ({})", m.label()))
+                .unwrap_or_else(|| "Merge".into());
+            let go = Button::new(label)
+                .variant(ButtonVariant::Contrast)
+                .disabled(!r.can_merge())
+                .on_press(|s: &mut App| s.merge())
+                .build(k);
+            modal(
+                "merge",
+                "Merge pull request",
+                None,
+                vec![status],
+                vec![cancel(k), go],
+                k,
+                layer,
+            );
         }
         None => {}
     }
@@ -1823,23 +2552,50 @@ fn demo(s: &mut App) {
         deletions: 2,
         updated: "2026-11-09".into(),
     };
-    let mut repo = Repo { default_branch: "main".into(), ..Default::default() };
+    let mut repo = Repo {
+        default_branch: "main".into(),
+        ..Default::default()
+    };
     repo.prs = vec![
-        pr(42, "Add retry jitter to the HTTP client", "alice", ReviewState::Unreviewed, false),
-        pr(41, "Cache resolved configs per workspace", "bob", ReviewState::Approved, false),
-        pr(39, "WIP: streaming exports", "carol", ReviewState::ChangesRequested, true),
+        pr(
+            42,
+            "Add retry jitter to the HTTP client",
+            "alice",
+            ReviewState::Unreviewed,
+            false,
+        ),
+        pr(
+            41,
+            "Cache resolved configs per workspace",
+            "bob",
+            ReviewState::Approved,
+            false,
+        ),
+        pr(
+            39,
+            "WIP: streaming exports",
+            "carol",
+            ReviewState::ChangesRequested,
+            true,
+        ),
     ];
     s.repos = BTreeMap::from([(slug.clone(), repo)]);
-    s.models = [("anthropic/claude-sonnet", "Claude Sonnet", "anthropic"), ("opencode/iceman-free", "Iceman Free", "opencode"), ("openai/gpt-5", "GPT-5", "openai")]
-        .into_iter()
-        .map(|(id, name, p)| {
-            let mut o = ComboboxOption::new(id, name);
-            o.detail = p.into();
-            o
-        })
-        .collect();
+    s.models = [
+        ("anthropic/claude-sonnet", "Claude Sonnet", "anthropic"),
+        ("opencode/iceman-free", "Iceman Free", "opencode"),
+        ("openai/gpt-5", "GPT-5", "openai"),
+    ]
+    .into_iter()
+    .map(|(id, name, p)| {
+        let mut o = ComboboxOption::new(id, name);
+        o.detail = p.into();
+        o
+    })
+    .collect();
     s.store.model = ModelRef::parse("opencode/iceman-free");
-    s.store.sessions.insert(store::session_key(&slug, 42), "ses_demo".into());
+    s.store
+        .sessions
+        .insert(store::session_key(&slug, 42), "ses_demo".into());
     s.target = Some(Target::Pr(slug, 42));
     let c = |author: &str, body: &str, path: Option<&str>, line, state: Option<&str>| Comment {
         author: author.into(),
@@ -1857,7 +2613,13 @@ fn demo(s: &mut App) {
         head_sha: "abc".into(),
         comments: vec![
             c("bob", "Nice, this has bitten us before.", None, None, None),
-            c("carol", "Should `jitter` be configurable?", Some("src/retry.rs"), Some(4), None),
+            c(
+                "carol",
+                "Should `jitter` be configurable?",
+                Some("src/retry.rs"),
+                Some(4),
+                None,
+            ),
             c("dave", "", None, None, Some("APPROVED")),
         ],
     });
@@ -1865,7 +2627,10 @@ fn demo(s: &mut App) {
         "diff --git a/src/retry.rs b/src/retry.rs\n--- a/src/retry.rs\n+++ b/src/retry.rs\n@@ -1,4 +1,5 @@\n pub struct Backoff {\n     base: Duration,\n-    max: Duration,\n+    max: Duration,\n+    jitter: f32,\n }\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,2 @@\n # widgets\n-Retries back off.\n+Retries back off, with jitter.\n",
     ));
     let h = file_hash(&s.diff.files()[1]);
-    s.store.viewed.insert(store::session_key("acme/widgets", 42), BTreeMap::from([("README.md".to_string(), h)]));
+    s.store.viewed.insert(
+        store::session_key("acme/widgets", 42),
+        BTreeMap::from([("README.md".to_string(), h)]),
+    );
     s.diff.set_collapsed(1, true);
     s.annotate();
     s.toast = Some(("Approved".into(), false));
@@ -1885,26 +2650,45 @@ fn demo(s: &mut App) {
 
 fn main() {
     let spec = AppSpec {
-        scenes: &[("demo", demo), ("add-repo", |s: &mut App| {
-            demo(s);
-            s.add_repo = Some(TextEdit::new(""));
-        }), ("line-review", |s: &mut App| {
-            demo(s);
-            s.toast = None;
-            s.panel = Panel::Review;
-            s.store.drafts.insert(
-                store::session_key("acme/widgets", 42),
-                vec![Draft { path: "src/retry.rs".into(), start: 3, end: 3, left: false, body: "Can `max` be `Option`?".into() }],
-            );
-            s.open_composer(LineRange::line(0, LineRef::new(Side::New, 2)));
-        }), ("comments", |s: &mut App| {
-            demo(s);
-            s.panel = Panel::Comments;
-            s.toast = None;
-        }), ("merge", |s: &mut App| {
-            demo(s);
-            s.confirm = Some(Confirm::Merge(Some(MergeReadiness::assess(true, "MERGEABLE", "CLEAN", false, &[("ci".into(), model::CheckResult::Pending)], Some(model::MergeMethod::Squash)))));
-        })],
+        scenes: &[
+            ("demo", demo),
+            ("add-repo", |s: &mut App| {
+                demo(s);
+                s.add_repo = Some(TextEdit::new(""));
+            }),
+            ("line-review", |s: &mut App| {
+                demo(s);
+                s.toast = None;
+                s.panel = Panel::Review;
+                s.store.drafts.insert(
+                    store::session_key("acme/widgets", 42),
+                    vec![Draft {
+                        path: "src/retry.rs".into(),
+                        start: 3,
+                        end: 3,
+                        left: false,
+                        body: "Can `max` be `Option`?".into(),
+                    }],
+                );
+                s.open_composer(LineRange::line(0, LineRef::new(Side::New, 2)));
+            }),
+            ("comments", |s: &mut App| {
+                demo(s);
+                s.panel = Panel::Comments;
+                s.toast = None;
+            }),
+            ("merge", |s: &mut App| {
+                demo(s);
+                s.confirm = Some(Confirm::Merge(Some(MergeReadiness::assess(
+                    true,
+                    "MERGEABLE",
+                    "CLEAN",
+                    false,
+                    &[("ci".into(), model::CheckResult::Pending)],
+                    Some(model::MergeMethod::Squash),
+                ))));
+            }),
+        ],
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
@@ -1913,7 +2697,11 @@ fn main() {
         min_size: Some((900.0, 560.0)),
         ..AppSpec::new("gitsnack", (1440.0, 900.0), init, view)
     };
-    let chrome = Chrome { full_size_content: true, traffic_lights: Some((16.0, 25.0)), drag_regions: true };
+    let chrome = Chrome {
+        full_size_content: true,
+        traffic_lights: Some((16.0, 25.0)),
+        drag_regions: true,
+    };
     rune::App::new(spec).chrome(chrome).modifier_keys().run();
 }
 
@@ -1933,14 +2721,21 @@ mod tests {
         git::fetch(&dir).unwrap();
         let default = git::default_branch(&dir);
         let commits = git::list_commits(&dir, &default, 5).unwrap();
-        assert!(!parse(&git::commit_diff(&dir, &commits[0].sha).unwrap()).is_empty() || commits[0].subject.contains("Merge"));
+        assert!(
+            !parse(&git::commit_diff(&dir, &commits[0].sha).unwrap()).is_empty()
+                || commits[0].subject.contains("Merge")
+        );
         git::list_branches(&dir, &default).unwrap();
         let prs = gh::list_prs(slug).unwrap();
         if let Some(pr) = prs.first() {
             assert!(!parse(&gh::pr_diff(slug, pr.number).unwrap()).is_empty());
             gh::pr_detail(slug, pr.number).unwrap();
         }
-        println!("default={default} prs={} commits={}", prs.len(), commits.len());
+        println!(
+            "default={default} prs={} commits={}",
+            prs.len(),
+            commits.len()
+        );
     }
 }
 
@@ -1954,8 +2749,14 @@ mod agent_tests {
     fn creates_and_reads_a_session() {
         let oc = Client::connect().unwrap();
         let models = oc.models().unwrap();
-        let free = models.iter().find(|m| m.0 == "opencode/iceman-free").or(models.first()).map(|m| ModelRef::parse(&m.0).unwrap());
-        let id = oc.create_session("gitsnack test", &std::env::temp_dir(), free.as_ref()).unwrap();
+        let free = models
+            .iter()
+            .find(|m| m.0 == "opencode/iceman-free")
+            .or(models.first())
+            .map(|m| ModelRef::parse(&m.0).unwrap());
+        let id = oc
+            .create_session("gitsnack test", &std::env::temp_dir(), free.as_ref())
+            .unwrap();
         if let Some(m) = &free {
             oc.set_model(&id, m).unwrap();
         }
@@ -1976,6 +2777,10 @@ mod comment_tests {
     fn reads_inline_comments() {
         let d = gh::pr_detail("sharkdp/hexyl", 300).unwrap();
         assert!(!d.head_sha.is_empty());
-        assert!(d.comments.iter().any(|c| c.path.is_some() && c.line.is_some()));
+        assert!(
+            d.comments
+                .iter()
+                .any(|c| c.path.is_some() && c.line.is_some())
+        );
     }
 }
