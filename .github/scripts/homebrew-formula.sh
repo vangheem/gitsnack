@@ -38,6 +38,10 @@ class Gitsnack < Formula
     <<~EOS
       gitsnack uses the GitHub CLI; log in with \`gh auth login\` if you haven't.
       The agent panel needs opencode v2: https://opencode.ai
+
+      On macOS, add gitsnack to ~/Applications (Spotlight, Launchpad, Dock) with:
+        gitsnack install-app
+      gitsnack also offers to do this the first time you run it.
     EOS
   end
 

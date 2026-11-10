@@ -23,6 +23,9 @@ pub struct Store {
     pub model: Option<ModelRef>,
     #[serde(default)]
     pub drafts: BTreeMap<String, Vec<Draft>>,
+    /// The user chose "Don't ask again" for adding gitsnack.app to ~/Applications.
+    #[serde(default)]
+    pub skip_app_prompt: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

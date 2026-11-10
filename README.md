@@ -69,6 +69,21 @@ brew install vangheem/tap/gitsnack
 
 This also installs `gh`. Upgrade with `brew upgrade gitsnack`.
 
+#### As a Mac app
+
+```sh
+gitsnack install-app      # creates ~/Applications/gitsnack.app
+gitsnack uninstall-app    # removes it
+```
+
+gitsnack also offers to do this the first time you start it from a terminal. Then open it from
+Spotlight, Launchpad or the Dock like any other app.
+
+The app is created on your Mac rather than downloaded, so macOS doesn't block it even though
+gitsnack isn't signed. It runs the installed `gitsnack` through Homebrew's version-independent
+path, so `brew upgrade` updates the app too, and it picks up your login shell's `PATH`, so it
+finds `gh`, `git` and `opencode` when opened from Finder.
+
 ### Prebuilt binaries
 
 Tagged releases (`v*`) are on the [releases page](https://github.com/vangheem/gitsnack/releases),

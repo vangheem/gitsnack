@@ -1,6 +1,7 @@
 //! gitsnack: tracked repos and their PRs on the left, the diff in the middle, and an
 //! opencode agent (or the review composer) on the right.
 
+mod appbundle;
 mod gh;
 mod git;
 mod model;
@@ -72,6 +73,7 @@ enum Confirm {
     Merge(Option<MergeReadiness>),
     Draft(bool),
     Checks,
+    InstallApp,
 }
 
 struct App {
@@ -882,6 +884,20 @@ impl App {
         );
     }
 
+    fn install_app(&mut self) {
+        self.confirm = None;
+        self.bg(appbundle::install, |s, res, _| match res {
+            Ok(app) => s.notify(
+                format!(
+                    "Added {}. Open gitsnack from Spotlight or Launchpad.",
+                    app.display()
+                ),
+                false,
+            ),
+            Err(e) => s.notify(format!("Couldn't add gitsnack.app: {e:#}"), true),
+        });
+    }
+
     fn check_merge(&mut self) {
         let Some(Target::Pr(slug, n)) = self.target.clone() else {
             return;
@@ -988,6 +1004,15 @@ fn preamble(slug: &str, pr: &PullRequest) -> String {
 
 fn setup(s: &mut App, waker: Waker) {
     s.waker = Some(waker);
+    // Started from a terminal on a Mac without the app installed: offer to add it.
+    if appbundle::supported()
+        && !appbundle::launched_from_app()
+        && !appbundle::installed()
+        && !s.store.skip_app_prompt
+        && rune::tooling::headless_run().is_none()
+    {
+        s.confirm = Some(Confirm::InstallApp);
+    }
     s.client();
     for slug in s.store.repos.clone() {
         s.refresh_repo(&slug);
@@ -2618,6 +2643,43 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
             );
         }
         Some(Confirm::Checks) => checks_dialog(s, k, layer),
+        Some(Confirm::InstallApp) => {
+            let never = Button::new("Don't ask again")
+                .variant(ButtonVariant::Ghost)
+                .on_press(|s: &mut App| {
+                    s.confirm = None;
+                    s.store.skip_app_prompt = true;
+                    s.save();
+                    s.notify("You can add it later with `gitsnack install-app`", false);
+                })
+                .build(k);
+            let later = Button::new("Not now")
+                .variant(ButtonVariant::Ghost)
+                .on_press(|s: &mut App| s.confirm = None)
+                .build(k);
+            let add = Button::new("Add to Applications")
+                .variant(ButtonVariant::Contrast)
+                .on_press(|s: &mut App| s.install_app())
+                .build(k);
+            let detail = text(format!(
+                "Creates {} so you can open gitsnack from Spotlight, Launchpad or the Dock. \
+                 It runs the gitsnack you already have installed, so `brew upgrade` keeps it current. \
+                 Same as running `gitsnack install-app`.",
+                "~/Applications/gitsnack.app"
+            ))
+            .font(k.ty.ui)
+            .color(k.c.text_muted)
+            .wrap();
+            modal(
+                "install-app",
+                "Add gitsnack to your Applications?",
+                None,
+                vec![detail],
+                vec![never, later, add],
+                k,
+                layer,
+            );
+        }
         Some(Confirm::Merge(r)) => {
             let Some(r) = r else {
                 let wait = row()
@@ -2871,6 +2933,9 @@ fn demo(s: &mut App) {
 }
 
 fn main() {
+    if appbundle::cli(&std::env::args().collect::<Vec<_>>()) {
+        return;
+    }
     // A bare binary has no bundle icon; this gives the Dock and app switcher the logo.
     let _ = rune::set_app_icon(include_bytes!("../assets/icon.png").to_vec());
     let spec = AppSpec {
@@ -2900,6 +2965,11 @@ fn main() {
                 demo(s);
                 s.toast = None;
                 s.confirm = Some(Confirm::Checks);
+            }),
+            ("install-app", |s: &mut App| {
+                demo(s);
+                s.toast = None;
+                s.confirm = Some(Confirm::InstallApp);
             }),
             ("comments", |s: &mut App| {
                 demo(s);
