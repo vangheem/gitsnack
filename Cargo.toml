@@ -1,0 +1,21 @@
+[package]
+name = "gitsnack"
+version = "0.1.0"
+edition = "2024"
+description = "Native pull request review app with opencode agent sessions layered onto each PR"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+rune = { git = "https://github.com/anomalyco/rune", rev = "2a44156b21d63b0342a366b26d9222a6edd4622c" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "2a44156b21d63b0342a366b26d9222a6edd4622c", features = ["markdown"] }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "2a44156b21d63b0342a366b26d9222a6edd4622c" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+opt-level = 2
