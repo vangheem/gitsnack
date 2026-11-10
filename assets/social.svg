@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1280 640" width="1280" height="640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b2347"/>
+      <stop offset="1" stop-color="#110d22"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <image href="logo.svg" x="90" y="120" width="400" height="400"/>
+  <text x="540" y="300" font-family="Inter, Helvetica Neue, Arial, sans-serif" font-size="112" font-weight="700" fill="#f4c27a">gitsnack</text>
+  <text x="544" y="370" font-family="Inter, Helvetica Neue, Arial, sans-serif" font-size="36" fill="#d9d3ef">Review pull requests with an</text>
+  <text x="544" y="418" font-family="Inter, Helvetica Neue, Arial, sans-serif" font-size="36" fill="#d9d3ef">opencode agent at your side.</text>
+</svg>

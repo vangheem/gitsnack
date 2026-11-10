@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2347"/>
+      <stop offset="1" stop-color="#15112a"/>
+    </linearGradient>
+    <radialGradient id="cookie" cx="0.42" cy="0.38" r="0.7">
+      <stop offset="0" stop-color="#f4c27a"/>
+      <stop offset="0.65" stop-color="#e0a052"/>
+      <stop offset="1" stop-color="#c47f37"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#f6b75e" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#f6b75e" stop-opacity="0"/>
+    </radialGradient>
+    <!-- The bite: three overlapping circles cut from the upper right. -->
+    <mask id="bite">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <circle cx="790" cy="300" r="92" fill="#000"/>
+      <circle cx="728" cy="214" r="78" fill="#000"/>
+      <circle cx="838" cy="402" r="70" fill="#000"/>
+    </mask>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <!-- App-icon squircle -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <circle cx="512" cy="530" r="380" fill="url(#glow)"/>
+
+  <g mask="url(#bite)" filter="url(#shadow)">
+    <!-- Cookie -->
+    <circle cx="512" cy="530" r="318" fill="url(#cookie)"/>
+    <circle cx="512" cy="530" r="318" fill="none" stroke="#a9692b" stroke-width="10" opacity="0.5"/>
+    <!-- Crumbs / texture -->
+    <g fill="#c98a43" opacity="0.55">
+      <circle cx="330" cy="420" r="9"/><circle cx="660" cy="700" r="8"/><circle cx="380" cy="760" r="10"/>
+      <circle cx="610" cy="520" r="7"/><circle cx="300" cy="610" r="8"/><circle cx="700" cy="560" r="9"/>
+      <circle cx="470" cy="330" r="7"/><circle cx="560" cy="790" r="7"/>
+    </g>
+
+    <!-- Stray chips, so it reads as a cookie first -->
+    <g fill="#5a341a">
+      <ellipse cx="330" cy="520" rx="22" ry="17" transform="rotate(-20 330 520)"/>
+      <ellipse cx="640" cy="760" rx="20" ry="15" transform="rotate(25 640 760)"/>
+      <ellipse cx="560" cy="300" rx="18" ry="14" transform="rotate(10 560 300)"/>
+      <ellipse cx="740" cy="600" rx="17" ry="13" transform="rotate(-35 740 600)"/>
+    </g>
+
+    <!-- Git graph drawn in chocolate: a main line and a branch curving off to its own commit -->
+    <g fill="none" stroke="#4a2a14" stroke-width="34" stroke-linecap="round">
+      <path d="M440 345 L440 735"/>
+      <path d="M440 650 C440 520 650 600 650 450"/>
+    </g>
+    <!-- Commits as chocolate chips -->
+    <g fill="#4a2a14">
+      <circle cx="440" cy="345" r="58"/>
+      <circle cx="440" cy="735" r="58"/>
+      <circle cx="650" cy="450" r="58"/>
+    </g>
+    <!-- Chip highlights -->
+    <g fill="#7a4a26">
+      <circle cx="422" cy="325" r="17"/>
+      <circle cx="422" cy="715" r="17"/>
+      <circle cx="632" cy="430" r="17"/>
+    </g>
+  </g>
+</svg>

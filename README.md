@@ -1,4 +1,14 @@
-# gitsnack
+<p align="center">
+  <img src="assets/logo.svg" width="128" height="128" alt="gitsnack logo: a cookie with a bite out of it, its chocolate chips forming a git branch">
+</p>
+
+<h1 align="center">gitsnack</h1>
+
+<p align="center">
+  <a href="https://github.com/vangheem/gitsnack/releases/latest"><img src="https://img.shields.io/github/v/release/vangheem/gitsnack?sort=semver" alt="Latest release"></a>
+  <a href="https://github.com/vangheem/gitsnack/actions/workflows/ci.yml"><img src="https://github.com/vangheem/gitsnack/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/vangheem/gitsnack" alt="MIT license"></a>
+</p>
 
 A native desktop app for reviewing GitHub pull requests, with an
 [opencode](https://opencode.ai) agent built into each review. It's built with
@@ -8,6 +18,8 @@ Instead of opening GitHub to find what needs your review, then opening a termina
 an agent about the PR, gitsnack puts both in one window: the PR list, the diff, the
 conversation, your review, and an agent session that already knows which PR you're looking
 at.
+
+![gitsnack reviewing a pull request: repos and PRs on the left, the changed-files tree and diff in the middle, the agent panel on the right](assets/screenshot.png)
 
 ## Features
 

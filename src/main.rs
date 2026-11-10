@@ -2871,6 +2871,8 @@ fn demo(s: &mut App) {
 }
 
 fn main() {
+    // A bare binary has no bundle icon; this gives the Dock and app switcher the logo.
+    let _ = rune::set_app_icon(include_bytes!("../assets/icon.png").to_vec());
     let spec = AppSpec {
         scenes: &[
             ("demo", demo),

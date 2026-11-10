@@ -80,11 +80,14 @@ jobs:
       - name: Tagged release
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+          logo="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/assets/logo.png"
+          header="<img src=\"$logo\" width=\"96\" alt=\"gitsnack\">"$'\n\n'"Install or upgrade with \`brew install vangheem/tap/gitsnack\` (or \`brew upgrade gitsnack\`)."
+          gh release create "$GITHUB_REF_NAME" dist/* --title "gitsnack $GITHUB_REF_NAME" --notes "$header" --generate-notes --verify-tag
       - name: Rolling `latest` prerelease
         if: github.ref == 'refs/heads/main'
         run: |
-          notes="Built from ${GITHUB_SHA::7} on main. Replaced on every push to main."
+          logo="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/assets/logo.png"
+          notes="<img src=\"$logo\" width=\"96\" alt=\"gitsnack\">"$'\n\n'"Built from ${GITHUB_SHA::7} on main. Replaced on every push to main."
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest dist/* --target "$GITHUB_SHA" --prerelease \
             --title "Latest build (${GITHUB_SHA::7})" --notes "$notes"
