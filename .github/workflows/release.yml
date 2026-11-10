@@ -23,6 +23,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$crate" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != Cargo.toml version $crate"; exit 1; }
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
@@ -83,3 +88,43 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest dist/* --target "$GITHUB_SHA" --prerelease \
             --title "Latest build (${GITHUB_SHA::7})" --notes "$notes"
+
+  homebrew:
+    name: Update Homebrew tap
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          macos=$(cut -d' ' -f1 dist/gitsnack-macos-universal.tar.gz.sha256)
+          linux=$(cut -d' ' -f1 dist/gitsnack-linux-x86_64.tar.gz.sha256)
+          bash .github/scripts/homebrew-formula.sh "$version" "$macos" "$linux" > gitsnack.rb
+          cat gitsnack.rb
+      - name: Push to vangheem/homebrew-tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:vangheem/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp gitsnack.rb tap/Formula/gitsnack.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/gitsnack.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged"
+          else
+            git commit -m "gitsnack ${GITHUB_REF_NAME}"
+            git push origin HEAD
+          fi

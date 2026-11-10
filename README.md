@@ -49,11 +49,19 @@ macOS is the main target. Linux builds are provided too; "Open in terminal" is m
 
 ## Install
 
+### Homebrew (macOS and Linux x86_64)
+
+```sh
+brew install vangheem/tap/gitsnack
+```
+
+This also installs `gh`. Upgrade with `brew upgrade gitsnack`.
+
 ### Prebuilt binaries
 
-Every push to `main` publishes binaries to the
-[`latest` prerelease](https://github.com/vangheem/gitsnack/releases/tag/latest), and
-version tags (`v*`) publish regular releases.
+Tagged releases (`v*`) are on the [releases page](https://github.com/vangheem/gitsnack/releases),
+and every push to `main` refreshes the
+[`latest` prerelease](https://github.com/vangheem/gitsnack/releases/tag/latest).
 
 | Platform | Asset |
 | --- | --- |
@@ -61,14 +69,13 @@ version tags (`v*`) publish regular releases.
 | Linux x86_64 | `gitsnack-linux-x86_64.tar.gz` |
 
 ```sh
-curl -L -o gitsnack.tar.gz \
-  https://github.com/vangheem/gitsnack/releases/download/latest/gitsnack-macos-universal.tar.gz
-tar xzf gitsnack.tar.gz
+curl -L https://github.com/vangheem/gitsnack/releases/latest/download/gitsnack-macos-universal.tar.gz | tar xz
 mkdir -p ~/.local/bin && mv gitsnack ~/.local/bin/
 ```
 
-The binaries aren't signed. If you downloaded one with a browser, macOS quarantines it; clear
-that with `xattr -d com.apple.quarantine ~/.local/bin/gitsnack`.
+The binaries aren't signed. Homebrew and `curl` installs work as is; if you download one with
+a browser, macOS quarantines it, so clear that with
+`xattr -d com.apple.quarantine ~/.local/bin/gitsnack`.
 
 On Linux, `libxkbcommon-x11-0` and a Vulkan driver (e.g. `mesa-vulkan-drivers`) must be
 installed.
@@ -109,6 +116,18 @@ Everything gitsnack keeps is under `~/.local/share/gitsnack/` (or `$XDG_DATA_HOM
 - `repos/<owner>/<name>`: the managed clones.
 
 Removing a repo in the app stops tracking it but leaves its clone in place.
+
+## Releasing
+
+Bump `version` in `Cargo.toml`, commit, then tag and push:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The release workflow checks the tag matches `Cargo.toml`, publishes the release with
+binaries, and updates the formula in
+[vangheem/homebrew-tap](https://github.com/vangheem/homebrew-tap).
 
 ## Development
 
