@@ -95,15 +95,17 @@ pub fn pr_detail(slug: &str, number: u64) -> Result<PrDetail> {
     Ok(PrDetail { body: s(&v, "body"), checks: checks(&v), head_sha: s(&v, "headRefOid"), comments })
 }
 
-pub fn add_comment(slug: &str, number: u64, body: &str) -> Result<()> {
-    let n = number.to_string();
-    gh(&["pr", "comment", &n, "-R", slug, "--body-file", "-"], Some(body))?;
-    Ok(())
+/// Posts a conversation comment and returns it as GitHub stored it.
+pub fn add_comment(slug: &str, number: u64, body: &str) -> Result<Comment> {
+    let api = format!("repos/{slug}/issues/{number}/comments");
+    let payload = serde_json::json!({ "body": body }).to_string();
+    let out = gh(&["api", &api, "--method", "POST", "--input", "-"], Some(&payload))?;
+    rest_comment(&serde_json::from_slice(&out.stdout)?)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// A single inline comment on `path`, spanning `start..=end` on one side of the diff.
-pub fn add_line_comment(slug: &str, number: u64, commit: &str, path: &str, start: u32, end: u32, left: bool, body: &str) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub fn add_line_comment(slug: &str, number: u64, commit: &str, path: &str, start: u32, end: u32, left: bool, body: &str) -> Result<Comment> {
     let side = if left { "LEFT" } else { "RIGHT" };
     let mut payload = serde_json::json!({ "body": body, "commit_id": commit, "path": path, "line": end, "side": side });
     if start != end {
@@ -111,8 +113,27 @@ pub fn add_line_comment(slug: &str, number: u64, commit: &str, path: &str, start
         payload["start_side"] = side.into();
     }
     let api = format!("repos/{slug}/pulls/{number}/comments");
-    gh(&["api", &api, "--method", "POST", "--input", "-"], Some(&payload.to_string()))?;
-    Ok(())
+    let out = gh(&["api", &api, "--method", "POST", "--input", "-"], Some(&payload.to_string()))?;
+    rest_comment(&serde_json::from_slice(&out.stdout)?)
+}
+
+/// A comment from the REST API (issue comments and pull request review comments share this).
+fn rest_comment(c: &Value) -> Result<Comment> {
+    let s = |k: &str| c.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    if c.get("id").is_none() {
+        return Err(anyhow!("unexpected comment response from GitHub"));
+    }
+    let path = c.get("path").and_then(Value::as_str).map(str::to_string);
+    Ok(Comment {
+        author: c["user"]["login"].as_str().unwrap_or("you").to_string(),
+        body: s("body"),
+        created: s("created_at"),
+        review_state: None,
+        line: path.as_ref().and(c["line"].as_u64().or_else(|| c["original_line"].as_u64())).map(|l| l as u32),
+        left: s("side") == "LEFT",
+        reply: !c["in_reply_to_id"].is_null(),
+        path,
+    })
 }
 
 pub fn merge_readiness(slug: &str, number: u64) -> Result<MergeReadiness> {
@@ -305,5 +326,23 @@ impl From<GhPullRequest> for PullRequest {
             deletions: i.deletions,
             updated: i.updated_at.get(..10).unwrap_or("").to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hits GitHub: `cargo test -- --ignored`. A posted comment, read back through the REST
+    /// shape the POST returns, matches what `pr_detail` later lists, so it isn't shown twice.
+    #[test]
+    #[ignore]
+    fn rest_comments_match_listed_ones() {
+        let out = gh(&["api", "repos/sharkdp/hexyl/pulls/300/comments"], None).unwrap();
+        let rest: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+        let first = rest_comment(&rest[0]).unwrap();
+        let listed = pr_detail("sharkdp/hexyl", 300).unwrap();
+        assert!(listed.comments.iter().any(|c| c.author == first.author && c.body == first.body && c.created == first.created));
+        assert!(first.path.is_some() && first.line.is_some());
     }
 }

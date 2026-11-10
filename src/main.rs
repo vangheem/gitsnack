@@ -92,6 +92,8 @@ struct App {
     add_repo: Option<TextEdit>,
     toast: Option<(String, bool)>,
     toast_until: Option<f64>,
+    /// Comments posted from here that GitHub's reads may not return yet.
+    posted: Vec<Comment>,
     next_repo_refresh: Option<f64>,
 }
 
@@ -139,6 +141,7 @@ fn init() -> App {
         add_repo: None,
         toast: None,
         toast_until: None,
+        posted: Vec::new(),
         next_repo_refresh: None,
     }
 }
@@ -279,21 +282,49 @@ impl App {
         self.annotate();
     }
 
-    fn reload_comments(&mut self) {
+    /// Re-reads the PR's comments. GitHub's reads lag its writes by a moment, so after posting,
+    /// `after` delays the read and comments posted from here that it doesn't have yet are kept.
+    fn reload_comments(&mut self, after: Duration) {
         let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
         let target = self.target.clone();
-        self.bg(move || gh::pr_detail(&slug, n), move |s, res, _| {
-            if s.target != target {
-                return;
-            }
-            match res {
-                Ok(d) => {
-                    s.detail = Some(d);
-                    s.annotate();
+        self.bg(
+            move || {
+                std::thread::sleep(after);
+                gh::pr_detail(&slug, n)
+            },
+            move |s, res, _| {
+                if s.target != target {
+                    return;
                 }
-                Err(e) => s.notify(e.to_string(), true),
-            }
-        });
+                match res {
+                    Ok(mut d) => {
+                        let fresh = std::mem::take(&mut s.posted);
+                        for c in fresh {
+                            if d.comments.iter().any(|x| x.author == c.author && x.body == c.body && x.created == c.created) {
+                                continue;
+                            }
+                            s.posted.push(c.clone());
+                            d.comments.push(c);
+                        }
+                        d.comments.sort_by(|a, b| a.created.cmp(&b.created));
+                        s.detail = Some(d);
+                        s.annotate();
+                    }
+                    Err(e) => s.notify(e.to_string(), true),
+                }
+            },
+        );
+    }
+
+    /// Shows a comment GitHub just accepted, before its reads catch up.
+    fn show_posted(&mut self, c: Comment) {
+        if let Some(d) = &mut self.detail {
+            d.comments.push(c.clone());
+            d.comments.sort_by(|a, b| a.created.cmp(&b.created));
+        }
+        self.posted.push(c);
+        self.annotate();
+        self.reload_comments(Duration::from_secs(3));
     }
 
     /// Posts the composer as a PR comment, or on the selected diff lines when there are some.
@@ -318,11 +349,11 @@ impl App {
             |s, res, _| {
                 s.busy = false;
                 match res {
-                    Ok(()) => {
+                    Ok(c) => {
                         s.comment = TextEdit::new("");
                         s.diff.set_selection(None);
                         s.notify("Comment posted", false);
-                        s.reload_comments();
+                        s.show_posted(c);
                     }
                     Err(e) => s.notify(e.to_string(), true),
                 }
@@ -406,6 +437,7 @@ impl App {
         self.target = Some(target.clone());
         self.set_diff(Vec::new());
         self.composing = None;
+        self.posted.clear();
         self.diff_loading = true;
         self.diff_error = None;
         self.detail = None;
@@ -618,7 +650,7 @@ impl App {
                         }
                         s.notify(kind.submitted(), false);
                         s.refresh_repo(&slug);
-                        s.reload_comments();
+                        s.reload_comments(Duration::from_secs(3));
                     }
                     Err(e) => s.notify(e.to_string(), true),
                 }
