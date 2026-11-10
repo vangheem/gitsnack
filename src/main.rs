@@ -14,7 +14,7 @@ use std::time::Duration;
 use rune::{AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, el, row, text};
 use rune_kit::diff::{Annotation, DiffMode, DiffState, DiffView, FileDiff, LineRange, LineRef, Side, parse};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Badge, BadgeVariant, Button, Checkbox, FileNode, FileTree, Tree, TreeItem, TreeModel, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
+use rune_kit::{Badge, BadgeVariant, Button, Checkbox, IconButton, IconButtonVariant, FileNode, FileTree, Tree, TreeItem, TreeModel, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
 
 use model::{Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 use opencode::{Client, Entry, Snapshot};
@@ -788,6 +788,17 @@ fn toolbar_actions(s: &App, k: &Kit) -> El {
                 .build(k),
         );
     }
+    let open = s.inspector.is_open();
+    r = r.child(
+        IconButton::new(&shell::INSPECTOR)
+            .variant(IconButtonVariant::GhostMuted)
+            .expanded(open)
+            .label(if open { "Hide panel" } else { "Show panel" })
+            .shortcut("⌘I")
+            .on_press(|s: &mut App| s.inspector.toggle())
+            .build(k)
+            .key("inspector-toggle"),
+    );
     r.child(
         Button::new("Refresh")
             .variant(ButtonVariant::Ghost)
