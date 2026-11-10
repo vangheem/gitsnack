@@ -119,15 +119,14 @@ Removing a repo in the app stops tracking it but leaves its clone in place.
 
 ## Releasing
 
-Bump `version` in `Cargo.toml`, commit, then tag and push:
-
-```sh
-git tag v0.2.0 && git push origin v0.2.0
-```
-
-The release workflow checks the tag matches `Cargo.toml`, publishes the release with
-binaries, and updates the formula in
+Run the **Release new version** workflow from the Actions tab (or
+`gh workflow run bump-version.yml -f bump=patch`) and pick `patch`, `minor` or `major`.
+It bumps the version in `Cargo.toml` and `Cargo.lock`, commits to `main`, and pushes a
+`vX.Y.Z` tag. The tag starts the release workflow, which builds the binaries, publishes the
+GitHub release and updates the formula in
 [vangheem/homebrew-tap](https://github.com/vangheem/homebrew-tap).
+
+Tagging by hand works too, as long as the tag matches the version in `Cargo.toml`.
 
 ## Development
 
