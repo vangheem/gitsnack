@@ -102,7 +102,7 @@ const PRESETS: &[(&str, &str)] = &[
 
 fn init() -> App {
     let store = Store::load();
-    let repos = store.repos.iter().map(|r| (r.clone(), Repo::default())).collect();
+    let repos = store.repos.iter().map(|r| (r.clone(), Repo { collapsed: true, ..Repo::default() })).collect();
     App {
         store,
         jobs: channel(),
