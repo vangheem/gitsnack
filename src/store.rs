@@ -18,8 +18,29 @@ pub struct Store {
     #[serde(default)]
     pub viewed: BTreeMap<String, BTreeMap<String, String>>,
     /// `"owner/name#123"` → line comments waiting to be submitted with the next review.
+    /// The opencode model agent sessions use; opencode's default when unset.
+    #[serde(default)]
+    pub model: Option<ModelRef>,
     #[serde(default)]
     pub drafts: BTreeMap<String, Vec<Draft>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRef {
+    pub provider: String,
+    pub id: String,
+}
+
+impl ModelRef {
+    /// `provider/id`, the combobox option id.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.provider, self.id)
+    }
+
+    pub fn parse(key: &str) -> Option<ModelRef> {
+        let (provider, id) = key.split_once('/')?;
+        Some(ModelRef { provider: provider.into(), id: id.into() })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

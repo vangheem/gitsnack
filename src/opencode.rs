@@ -9,6 +9,8 @@ use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use serde_json::{Value, json};
 
+use crate::store::ModelRef;
+
 #[derive(Clone)]
 pub struct Client {
     url: String,
@@ -80,11 +82,17 @@ impl Client {
 
     fn post(&self, path: &str, body: Value) -> Result<Value> {
         let r = self.agent.post(&format!("{}{path}", self.url)).set("Authorization", &self.auth).send_json(body);
-        Ok(map_err(r)?.into_json()?)
+        // Some endpoints (switching a session's model) answer with no body.
+        let text = map_err(r)?.into_string()?;
+        if text.trim().is_empty() { Ok(Value::Null) } else { Ok(serde_json::from_str(&text)?) }
     }
 
-    pub fn create_session(&self, title: &str, dir: &Path) -> Result<String> {
-        let v = self.post("/api/session", json!({ "title": title, "location": { "directory": dir } }))?;
+    pub fn create_session(&self, title: &str, dir: &Path, model: Option<&ModelRef>) -> Result<String> {
+        let mut body = json!({ "title": title, "location": { "directory": dir } });
+        if let Some(m) = model {
+            body["model"] = json!({ "id": m.id, "providerID": m.provider });
+        }
+        let v = self.post("/api/session", body)?;
         v["data"]["id"].as_str().map(str::to_string).ok_or_else(|| anyhow!("session create returned no id"))
     }
 
@@ -96,6 +104,29 @@ impl Client {
 
     pub fn session_exists(&self, id: &str) -> bool {
         self.get(&format!("/api/session/{id}")).is_ok()
+    }
+
+    pub fn set_model(&self, id: &str, m: &ModelRef) -> Result<()> {
+        self.post(&format!("/api/session/{id}/model"), json!({ "model": { "id": m.id, "providerID": m.provider } }))?;
+        Ok(())
+    }
+
+    /// Enabled models as `(provider/id, name, provider)`, sorted by provider then name.
+    pub fn models(&self) -> Result<Vec<(String, String, String)>> {
+        let v = self.get("/api/model")?;
+        let mut out: Vec<_> = v["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|m| m["enabled"].as_bool().unwrap_or(true) && m["status"].as_str() != Some("deprecated"))
+            .filter_map(|m| {
+                let (id, provider) = (m["id"].as_str()?, m["providerID"].as_str()?);
+                let name = m["name"].as_str().unwrap_or(id);
+                Some((format!("{provider}/{id}"), name.to_string(), provider.to_string()))
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.2, &a.1).cmp(&(&b.2, &b.1)));
+        Ok(out)
     }
 
     pub fn prompt(&self, id: &str, text: &str) -> Result<()> {

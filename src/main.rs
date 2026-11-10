@@ -14,11 +14,11 @@ use std::time::Duration;
 use rune::{AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, el, row, text};
 use rune_kit::diff::{Annotation, DiffMode, DiffState, DiffView, FileDiff, LineRange, LineRef, Side, parse};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Badge, BadgeVariant, Button, Checkbox, IconButton, IconButtonVariant, FileNode, FileTree, Tree, TreeItem, TreeModel, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
+use rune_kit::{Badge, BadgeVariant, Button, Checkbox, Combobox, ComboboxOption, ComboboxState, IconButton, IconButtonVariant, FileNode, FileTree, Tree, TreeItem, TreeModel, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
 
 use model::{Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 use opencode::{Client, Entry, Snapshot};
-use store::{Draft, Store};
+use store::{Draft, ModelRef, Store};
 
 type OnRow = Box<dyn Fn(&mut App, &mut Tx)>;
 type Job = Box<dyn FnOnce(&mut App, &mut Tx) + Send>;
@@ -83,6 +83,9 @@ struct App {
     chat_inflight: bool,
     next_chat_poll: f64,
     composer: TextEdit,
+    models: Vec<ComboboxOption>,
+    models_loading: bool,
+    model_combo: ComboboxState,
     review: TextEdit,
     comment: TextEdit,
     /// The inline composer opened from a diff line's "+".
@@ -133,6 +136,9 @@ fn init() -> App {
         chat_inflight: false,
         next_chat_poll: 0.0,
         composer: TextEdit::new(""),
+        models: Vec::new(),
+        models_loading: false,
+        model_combo: ComboboxState::default(),
         review: TextEdit::new(""),
         comment: TextEdit::new(""),
         composing: None,
@@ -539,6 +545,7 @@ impl App {
         let Some(pr) = self.pr().cloned() else { return };
         let oc = self.client();
         let existing = self.session_id();
+        let model = self.store.model.clone();
         let key = store::session_key(&slug, n);
         self.busy = true;
         self.bg(
@@ -549,8 +556,13 @@ impl App {
                 };
                 let dir = store::clone_dir(&slug);
                 let (id, fresh) = match existing.filter(|id| oc.session_exists(id)) {
-                    Some(id) => (id, false),
-                    None => (oc.create_session(&format!("Review {slug}#{n}: {}", pr.title), &dir)?, true),
+                    Some(id) => {
+                        if let Some(m) = &model {
+                            oc.set_model(&id, m)?;
+                        }
+                        (id, false)
+                    }
+                    None => (oc.create_session(&format!("Review {slug}#{n}: {}", pr.title), &dir, model.as_ref())?, true),
                 };
                 let text = if fresh { format!("{}\n\n{prompt}", preamble(&slug, &pr)) } else { prompt };
                 oc.prompt(&id, &text)?;
@@ -571,6 +583,39 @@ impl App {
                 }
             },
         );
+    }
+
+    fn load_models(&mut self) {
+        let Some(oc) = self.oc.clone() else { return };
+        self.models_loading = true;
+        self.bg(move || oc.models(), |s, res, _| {
+            s.models_loading = false;
+            match res {
+                Ok(list) => {
+                    s.models = list
+                        .into_iter()
+                        .map(|(id, name, provider)| {
+                            let mut o = ComboboxOption::new(id, name);
+                            o.detail = provider;
+                            o
+                        })
+                        .collect();
+                }
+                Err(e) => s.notify(format!("Couldn't list opencode models: {e}"), true),
+            }
+        });
+    }
+
+    fn choose_model(&mut self, key: &str) {
+        let Some(m) = ModelRef::parse(key) else { return };
+        self.store.model = Some(m.clone());
+        self.save();
+        let name = self.models.iter().find(|o| o.id == key).map_or(key.to_string(), |o| o.label.clone());
+        self.notify(format!("Agent model: {name}"), false);
+        // Switch the open PR's session now, so its next turn already uses it.
+        if self.session_id().is_some() {
+            self.session_call(move |oc, id| oc.set_model(id, &m));
+        }
     }
 
     fn send_composer(&mut self) {
@@ -740,6 +785,7 @@ fn preamble(slug: &str, pr: &PullRequest) -> String {
 
 fn setup(s: &mut App, waker: Waker) {
     s.waker = Some(waker);
+    s.client();
     for slug in s.store.repos.clone() {
         s.refresh_repo(&slug);
     }
@@ -750,6 +796,9 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     while let Ok(job) = s.jobs.1.try_recv() {
         job(s, tx);
         changed = true;
+    }
+    if s.oc.is_some() && s.models.is_empty() && !s.models_loading {
+        s.load_models();
     }
     // Repos refresh in the background every five minutes (setup did the first load).
     match s.next_repo_refresh {
@@ -853,7 +902,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         .trailing(toolbar_actions(s, &k));
     let split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, &k))
-        .inspector(&s.inspector, |s: &mut App| &mut s.inspector, inspector(s, &k))
+        .inspector(&s.inspector, |s: &mut App| &mut s.inspector, inspector(s, &k, &mut layer))
         .toolbar(toolbar)
         .titlebar_inset(cx.titlebar_inset())
         .frame_inset(8.0)
@@ -1325,7 +1374,7 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
     col().w_full().h_full().min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(list)
 }
 
-fn inspector(s: &App, k: &Kit) -> El {
+fn inspector(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     if !matches!(s.target, Some(Target::Pr(..))) {
         return col()
             .w_full()
@@ -1350,14 +1399,14 @@ fn inspector(s: &App, k: &Kit) -> El {
         })
         .build(k);
     let body = match s.panel {
-        Panel::Agent => agent_panel(s, k),
+        Panel::Agent => agent_panel(s, k, layer),
         Panel::Comments => comments_panel(s, k),
         Panel::Review => review_panel(s, k),
     };
     col().w_full().h_full().min_h(0.0).child(row().w_full().px(12.0).py(8.0).child(tabs)).child(body)
 }
 
-fn agent_panel(s: &App, k: &Kit) -> El {
+fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let id = s.session_id();
     let snap = id.as_ref().and_then(|id| s.chats.get(id));
     let running = snap.is_some_and(|c| c.running);
@@ -1407,6 +1456,19 @@ fn agent_panel(s: &App, k: &Kit) -> El {
                 .build(k),
         );
     }
+    let current = s.store.model.as_ref().map(ModelRef::key);
+    let model = Combobox::new("model", &s.model_combo, &s.models, |s: &mut App| &mut s.model_combo)
+        .label("Model")
+        .current(current.as_deref())
+        .placeholder(if s.models.is_empty() { "Loading models…" } else { "opencode default model" })
+        .search_placeholder("Search models")
+        .width(240.0)
+        .max_height(320.0)
+        .placement(rune_kit::Placement::TopStart)
+        .disabled(s.models.is_empty())
+        .on_choose(|s: &mut App, id: &str, _: &mut Tx| s.choose_model(id))
+        .build(k, layer);
+    let model_row = row().w_full().gap(8.0).items_center().child(text("Model").font(k.ty.small_medium).color(k.c.text_muted)).child(model);
     let mut actions = row().gap(6.0).items_center().child(row().grow(1.0));
     if id.is_some() {
         actions = actions.child(Button::new("Open in terminal").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).on_press(|s: &mut App| s.open_terminal()).build(k));
@@ -1433,6 +1495,7 @@ fn agent_panel(s: &App, k: &Kit) -> El {
         .gap(8.0)
         .padding(12.0)
         .border_sides([1.0, 0.0, 0.0, 0.0], k.c.border_muted)
+        .child(model_row)
         .child(presets)
         .child(
             TextArea::new(&s.composer)
@@ -1767,6 +1830,15 @@ fn demo(s: &mut App) {
         pr(39, "WIP: streaming exports", "carol", ReviewState::ChangesRequested, true),
     ];
     s.repos = BTreeMap::from([(slug.clone(), repo)]);
+    s.models = [("anthropic/claude-sonnet", "Claude Sonnet", "anthropic"), ("opencode/iceman-free", "Iceman Free", "opencode"), ("openai/gpt-5", "GPT-5", "openai")]
+        .into_iter()
+        .map(|(id, name, p)| {
+            let mut o = ComboboxOption::new(id, name);
+            o.detail = p.into();
+            o
+        })
+        .collect();
+    s.store.model = ModelRef::parse("opencode/iceman-free");
     s.store.sessions.insert(store::session_key(&slug, 42), "ses_demo".into());
     s.target = Some(Target::Pr(slug, 42));
     let c = |author: &str, body: &str, path: Option<&str>, line, state: Option<&str>| Comment {
@@ -1881,7 +1953,12 @@ mod agent_tests {
     #[ignore]
     fn creates_and_reads_a_session() {
         let oc = Client::connect().unwrap();
-        let id = oc.create_session("gitsnack test", &std::env::temp_dir()).unwrap();
+        let models = oc.models().unwrap();
+        let free = models.iter().find(|m| m.0 == "opencode/iceman-free").or(models.first()).map(|m| ModelRef::parse(&m.0).unwrap());
+        let id = oc.create_session("gitsnack test", &std::env::temp_dir(), free.as_ref()).unwrap();
+        if let Some(m) = &free {
+            oc.set_model(&id, m).unwrap();
+        }
         oc.prompt(&id, "Reply with exactly: pong").unwrap();
         let snap = oc.snapshot(&id).unwrap();
         oc.delete_session(&id).unwrap();
