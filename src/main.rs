@@ -90,7 +90,10 @@ struct App {
     add_repo: Option<TextEdit>,
     toast: Option<(String, bool)>,
     toast_until: Option<f64>,
+    next_repo_refresh: Option<f64>,
 }
+
+const REPO_REFRESH_SECS: f64 = 300.0;
 
 const PRESETS: &[(&str, &str)] = &[
     ("Review", "Review this PR thoroughly. Focus on correctness, design and edge cases. Group findings by severity, with file:line references, and say what you would change."),
@@ -133,6 +136,7 @@ fn init() -> App {
         add_repo: None,
         toast: None,
         toast_until: None,
+        next_repo_refresh: None,
     }
 }
 
@@ -623,6 +627,23 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     while let Ok(job) = s.jobs.1.try_recv() {
         job(s, tx);
         changed = true;
+    }
+    // Repos refresh in the background every five minutes (setup did the first load).
+    match s.next_repo_refresh {
+        None => {
+            s.next_repo_refresh = Some(now + REPO_REFRESH_SECS);
+            tx.wake_after(Duration::from_secs_f64(REPO_REFRESH_SECS));
+        }
+        Some(due) if now >= due => {
+            for slug in s.store.repos.clone() {
+                if s.repos.get(&slug).is_some_and(|r| !r.loading) {
+                    s.refresh_repo(&slug);
+                }
+            }
+            s.next_repo_refresh = Some(now + REPO_REFRESH_SECS);
+            tx.wake_after(Duration::from_secs_f64(REPO_REFRESH_SECS));
+        }
+        _ => {}
     }
     // Status messages linger a few seconds (errors longer), then go.
     if s.toast.is_some() {
