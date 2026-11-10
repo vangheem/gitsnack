@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use rune::{AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, row, text};
-use rune_kit::diff::{DiffMode, DiffState, DiffView, LineRange, Side, parse};
+use rune::{AppSpec, Chrome, Cx, El, KeyEvent, ScrollSpec, TextEdit, Tx, Waker, col, el, row, text};
+use rune_kit::diff::{DiffMode, DiffState, DiffView, FileDiff, LineRange, Side, parse};
 use rune_kit::shell::{self, PaneState, Sidebar, SidebarRow, SidebarSection, SidebarToggle, SplitView, Toolbar};
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
+use rune_kit::{Badge, BadgeVariant, Button, Checkbox, ButtonVariant, ControlSize, Dialog, Kit, Markdown, SegmentedControl, Spinner, TextArea, TextInput};
 
 use model::{CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 use opencode::{Client, Entry, Snapshot};
@@ -86,12 +86,14 @@ struct App {
     confirm: Option<Confirm>,
     add_repo: Option<TextEdit>,
     toast: Option<(String, bool)>,
+    toast_until: Option<f64>,
 }
 
 const PRESETS: &[(&str, &str)] = &[
     ("Review", "Review this PR thoroughly. Focus on correctness, design and edge cases. Group findings by severity, with file:line references, and say what you would change."),
     ("Summarize", "Summarize what this PR changes and why. Give an architectural overview and point out the critical code paths I should read closely."),
     ("Risks", "What could this PR break? Look for regressions, security issues, performance problems, migrations and backwards-compatibility risks."),
+    ("Back-compat", "Review this PR for backward compatibility only. Check public APIs, wire and file formats, database schemas and migrations, config and CLI flags, defaults, and behavior existing callers rely on. For each break, say who is affected, how bad it is, and how to keep compatibility (shims, deprecation paths, versioning, migrations)."),
     ("Tests", "Assess how well this change is tested. What is missing, and which cases would you add?"),
 ];
 
@@ -125,6 +127,7 @@ fn init() -> App {
         confirm: None,
         add_repo: None,
         toast: None,
+        toast_until: None,
     }
 }
 
@@ -147,6 +150,7 @@ impl App {
 
     fn notify(&mut self, msg: impl Into<String>, error: bool) {
         self.toast = Some((msg.into(), error));
+        self.toast_until = None;
     }
 
     fn save(&mut self) {
@@ -164,6 +168,33 @@ impl App {
     fn pr(&self) -> Option<&PullRequest> {
         let Some(Target::Pr(slug, n)) = &self.target else { return None };
         self.repos.get(slug)?.prs.iter().find(|p| p.number == *n)
+    }
+
+    fn pr_key(&self) -> Option<String> {
+        let Some(Target::Pr(slug, n)) = &self.target else { return None };
+        Some(store::session_key(slug, *n))
+    }
+
+    fn is_viewed(&self, file: usize) -> bool {
+        let (Some(key), Some(f)) = (self.pr_key(), self.diff.files().get(file)) else { return false };
+        self.store.viewed.get(&key).and_then(|m| m.get(f.path())).is_some_and(|h| *h == file_hash(f))
+    }
+
+    fn toggle_viewed(&mut self, file: usize) {
+        let (Some(key), Some(f)) = (self.pr_key(), self.diff.files().get(file)) else { return };
+        let (path, hash) = (f.path().to_string(), file_hash(f));
+        let viewed = !self.is_viewed(file);
+        let map = self.store.viewed.entry(key.clone()).or_default();
+        if viewed {
+            map.insert(path, hash);
+        } else {
+            map.remove(&path);
+        }
+        if map.is_empty() {
+            self.store.viewed.remove(&key);
+        }
+        self.diff.set_collapsed(file, viewed);
+        self.save();
     }
 
     fn session_id(&self) -> Option<String> {
@@ -243,6 +274,11 @@ impl App {
                         let mode = s.diff.mode();
                         s.diff = DiffState::new(parse(&patch));
                         s.diff.set_mode(mode);
+                        for i in 0..s.diff.files().len() {
+                            if s.is_viewed(i) {
+                                s.diff.set_collapsed(i, true);
+                            }
+                        }
                         s.detail = detail;
                     }
                     Err(e) => s.diff_error = Some(e.to_string()),
@@ -456,6 +492,25 @@ impl App {
     }
 }
 
+/// Identifies a file's change: any new push that alters this file's diff changes the hash.
+fn file_hash(f: &FileDiff) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes {
+            h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+        }
+        h = (h ^ 0xff).wrapping_mul(0x100000001b3);
+    };
+    eat(f.path().as_bytes());
+    for hunk in &f.hunks {
+        for line in &hunk.lines {
+            eat(format!("{:?}", line.kind).as_bytes());
+            eat(line.text.as_bytes());
+        }
+    }
+    format!("{h:016x}")
+}
+
 fn preamble(slug: &str, pr: &PullRequest) -> String {
     format!(
         "Context: I'm reviewing GitHub PR #{n} in {slug}: \"{title}\" by @{author} ({head} → {base}), {url}.\n\
@@ -483,6 +538,22 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     while let Ok(job) = s.jobs.1.try_recv() {
         job(s, tx);
         changed = true;
+    }
+    // Status messages linger a few seconds (errors longer), then go.
+    if s.toast.is_some() {
+        match s.toast_until {
+            None => {
+                let secs = if s.toast.as_ref().is_some_and(|t| t.1) { 8.0 } else { 4.0 };
+                s.toast_until = Some(now + secs);
+                tx.wake_after(Duration::from_secs_f64(secs));
+            }
+            Some(t) if now >= t => {
+                s.toast = None;
+                s.toast_until = None;
+                changed = true;
+            }
+            _ => {}
+        }
     }
     // Follow the open PR's session: quickly while the agent works, slowly otherwise so turns
     // taken from the TUI show up too.
@@ -571,17 +642,21 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 
 fn toast(k: &Kit, msg: &str, error: bool) -> El {
     let c = if error { &k.c.danger } else { &k.c.success };
-    row()
+    let card = row()
         .key("toast")
-        .absolute(0.0, 0.0)
-        .w_full()
-        .px(16.0)
+        .max_w(420.0)
+        .px(14.0)
         .py(10.0)
-        .gap(12.0)
+        .gap(10.0)
         .items_center()
-        .fill(c.bg)
-        .child(text(msg.to_string()).font(k.ty.ui).color(c.fg).wrap().grow(1.0))
-        .child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.toast = None).build(k))
+        .radius(8.0)
+        .fill(k.c.layer_01)
+        .border(1.0, c.border)
+        .child(el().size(8.0, 8.0).radius(4.0).fill(c.icon))
+        .child(text(msg.to_string()).font(k.ty.ui).color(k.c.text_base).wrap().shrink())
+        .pin(Some(16.0), None, None, Some(16.0))
+        .on_press(|s: &mut App| s.toast = None);
+    k.elevate(card, &k.elevation.overlay)
 }
 
 fn toolbar_actions(s: &App, k: &Kit) -> El {
@@ -757,7 +832,10 @@ fn main_pane(s: &App, k: &Kit) -> El {
     }
     let mut dv = DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff);
     if matches!(target, Target::Pr(..)) {
-        dv = dv.on_comment(|s: &mut App, lines, _| s.ask_about(lines));
+        let kc = k.clone();
+        dv = dv.on_comment(|s: &mut App, lines, _| s.ask_about(lines)).header_actions(move |s: &App, i| {
+            Checkbox::new(s.is_viewed(i)).label("Viewed").on_toggle(move |s: &mut App| s.toggle_viewed(i)).build(&kc)
+        });
     }
     c.child(col().w_full().grow(1.0).min_h(0.0).child(dv.build(s, k)))
 }
@@ -770,6 +848,12 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .child(text(format!("@{}", pr.author)).font(k.ty.small_medium).color(k.c.text_base))
         .child(text(format!("{} → {}", pr.head_ref, pr.base_ref)).font(k.ty.small).color(k.c.text_muted))
         .child(text(format!("+{adds} −{dels} · {} files", s.diff.files().len())).font(k.ty.small).color(k.c.text_faint))
+        .child({
+            let n = s.diff.files().len();
+            let done = (0..n).filter(|i| s.is_viewed(*i)).count();
+            let ink = if n > 0 && done == n { k.c.success.fg } else { k.c.text_muted };
+            text(format!("{done}/{n} viewed")).font(k.ty.small_medium).color(ink)
+        })
         .child(Badge::new(pr.review.label()).variant(if pr.review == ReviewState::Approved { BadgeVariant::Accent } else { BadgeVariant::Neutral }).build(k));
     if pr.is_draft {
         meta = meta.child(Badge::new("draft").variant(BadgeVariant::Subtle).build(k));
@@ -1062,72 +1146,98 @@ fn review_panel(s: &App, k: &Kit) -> El {
         )
 }
 
+/// A dialog sized to its content, with a padded body and right-aligned actions.
+fn modal(key: &str, title: &str, description: Option<&str>, body: Vec<El>, actions: Vec<El>, k: &Kit, layer: &mut Vec<El>) {
+    let mut footer = row().w_full().gap(8.0).pt(4.0).child(row().grow(1.0));
+    for a in actions {
+        footer = footer.child(a);
+    }
+    let mut content = col().w_full().px(16.0).pb(16.0).gap(12.0);
+    if let Some(desc) = description {
+        content = content.child(text(desc.to_string()).font(k.ty.ui).color(k.c.text_muted).wrap().mt(-6.0));
+    }
+    let content = content.children(body).child(footer);
+    Dialog::new(key, title).open(true).fit().width(460.0).child(content).on_close(|s: &mut App| {
+        s.add_repo = None;
+        s.confirm = None;
+    })
+    .build(k, layer);
+}
+
+fn cancel(k: &Kit) -> El {
+    Button::new("Cancel")
+        .variant(ButtonVariant::Ghost)
+        .on_press(|s: &mut App| {
+            s.add_repo = None;
+            s.confirm = None;
+        })
+        .build(k)
+}
+
 fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
     if let Some(edit) = &s.add_repo {
-        Dialog::new("add-repo", "Add repository")
-            .open(true)
-            .description("gitsnack keeps its own clone under ~/.local/share/gitsnack/repos.")
-            .child(
-                TextInput::new(edit)
-                    .placeholder("owner/name or GitHub URL")
-                    .on_edit(|s: &mut App| s.add_repo.as_mut().expect("dialog open"))
-                    .on_submit(|s: &mut App, _| s.add_repo())
-                    .build(k),
-            )
-            .child(
-                row()
-                    .gap(8.0)
-                    .child(row().grow(1.0))
-                    .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.add_repo = None).build(k))
-                    .child(Button::new("Add").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.add_repo()).build(k)),
-            )
-            .on_close(|s: &mut App| s.add_repo = None)
-            .build(k, layer);
+        let input = TextInput::new(edit)
+            .placeholder("owner/name or https://github.com/owner/name")
+            .width(None)
+            .on_edit(|s: &mut App| s.add_repo.as_mut().expect("dialog open"))
+            .on_submit(|s: &mut App, _| s.add_repo())
+            .build(k);
+        let add = Button::new("Add").variant(ButtonVariant::Contrast).on_press(|s: &mut App| s.add_repo()).build(k);
+        modal(
+            "add-repo",
+            "Add repository",
+            Some("gitsnack clones it into ~/.local/share/gitsnack/repos and keeps it fetched."),
+            vec![input],
+            vec![cancel(k), add],
+            k,
+            layer,
+        );
     }
     match &s.confirm {
         Some(Confirm::Draft(draft)) => {
             let draft = *draft;
-            Dialog::new("draft", if draft { "Convert to draft?" } else { "Mark ready for review?" })
-                .open(true)
-                .child(
-                    row()
-                        .gap(8.0)
-                        .child(row().grow(1.0))
-                        .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.confirm = None).build(k))
-                        .child(Button::new("Confirm").variant(ButtonVariant::Contrast).on_press(move |s: &mut App| s.set_draft(draft)).build(k)),
-                )
-                .on_close(|s: &mut App| s.confirm = None)
-                .build(k, layer);
+            let (title, desc) = if draft {
+                ("Convert to draft?", "Reviewers won't be asked to review it until it's marked ready again.")
+            } else {
+                ("Mark ready for review?", "Requested reviewers will be notified.")
+            };
+            let ok = Button::new("Confirm").variant(ButtonVariant::Contrast).on_press(move |s: &mut App| s.set_draft(draft)).build(k);
+            modal("draft", title, Some(desc), vec![], vec![cancel(k), ok], k, layer);
         }
         Some(Confirm::Merge(r)) => {
-            let mut d = Dialog::new("merge", "Merge pull request").open(true).width(420.0);
-            match r {
-                None => d = d.child(row().gap(8.0).child(Spinner::new().build(k)).child(text("Checking CI and merge rules…").font(k.ty.ui).color(k.c.text_muted))),
-                Some(r) => {
-                    let line = |l: &str, v: &str, ok: bool| {
-                        row()
-                            .gap(8.0)
-                            .child(text(l.to_string()).font(k.ty.ui).color(k.c.text_muted).w(90.0))
-                            .child(text(v.to_string()).font(k.ty.ui_medium).color(if ok { k.c.success.fg } else { k.c.danger.fg }))
-                    };
-                    d = d
-                        .child(line("Review", if r.approved { "approved" } else { "not approved" }, r.approved))
-                        .child(line("CI", &r.ci_label, r.ci_ok))
-                        .child(line("Merge", &r.merge_label, r.merge_ok));
-                    for p in &r.problems {
-                        d = d.child(text(format!("• {p}")).font(k.ty.small).color(k.c.text_faint));
-                    }
-                    let label = r.method.map(|m| format!("Merge ({})", m.label())).unwrap_or_else(|| "Merge".into());
-                    d = d.child(
-                        row()
-                            .gap(8.0)
-                            .child(row().grow(1.0))
-                            .child(Button::new("Cancel").variant(ButtonVariant::Ghost).on_press(|s: &mut App| s.confirm = None).build(k))
-                            .child(Button::new(label).variant(ButtonVariant::Contrast).disabled(!r.can_merge()).on_press(|s: &mut App| s.merge()).build(k)),
-                    );
+            let Some(r) = r else {
+                let wait = row().gap(10.0).items_center().child(Spinner::new().build(k)).child(text("Checking CI and merge rules…").font(k.ty.ui).color(k.c.text_muted));
+                modal("merge", "Merge pull request", None, vec![wait], vec![cancel(k)], k, layer);
+                return;
+            };
+            let line = |l: &str, v: &str, ok: bool, warn: bool| {
+                row()
+                    .w_full()
+                    .gap(8.0)
+                    .items_center()
+                    .child(text(l.to_string()).font(k.ty.ui).color(k.c.text_muted).w(80.0))
+                    .child(el().size(8.0, 8.0).radius(4.0).fill(if ok { k.c.success.icon } else if warn { k.c.warning.icon } else { k.c.danger.icon }))
+                    .child(text(v.to_string()).font(k.ty.ui_medium).color(k.c.text_base))
+            };
+            let mut status = col()
+                .w_full()
+                .gap(8.0)
+                .padding(12.0)
+                .radius(6.0)
+                .fill(k.c.bg_base)
+                .child(line("Review", if r.approved { "approved" } else { "not approved" }, r.approved, false))
+                .child(line("CI", &r.ci_label, r.ci_ok, r.ci_label.starts_with("pending")))
+                .child(line("Merge", &r.merge_label, r.merge_ok, false));
+            if !r.problems.is_empty() {
+                let mut list = col().gap(4.0).pt(4.0);
+                for p in &r.problems {
+                    list = list.child(text(format!("• {p}")).font(k.ty.small).color(k.c.text_muted));
                 }
+                status = status.child(list);
             }
-            d.on_close(|s: &mut App| s.confirm = None).build(k, layer);
+            let label = r.method.map(|m| format!("Merge ({})", m.label())).unwrap_or_else(|| "Merge".into());
+            let go = Button::new(label).variant(ButtonVariant::Contrast).disabled(!r.can_merge()).on_press(|s: &mut App| s.merge()).build(k);
+            modal("merge", "Merge pull request", None, vec![status], vec![cancel(k), go], k, layer);
         }
         None => {}
     }
@@ -1160,8 +1270,12 @@ fn demo(s: &mut App) {
     s.target = Some(Target::Pr(slug, 42));
     s.detail = Some(PrDetail { body: "Spreads retries out so clients that failed together don't retry together.".into(), checks: vec![("ci".into(), model::CheckResult::Pass)] });
     s.diff = DiffState::new(parse(
-        "diff --git a/src/retry.rs b/src/retry.rs\n--- a/src/retry.rs\n+++ b/src/retry.rs\n@@ -1,4 +1,5 @@\n pub struct Backoff {\n     base: Duration,\n-    max: Duration,\n+    max: Duration,\n+    jitter: f32,\n }\n",
+        "diff --git a/src/retry.rs b/src/retry.rs\n--- a/src/retry.rs\n+++ b/src/retry.rs\n@@ -1,4 +1,5 @@\n pub struct Backoff {\n     base: Duration,\n-    max: Duration,\n+    max: Duration,\n+    jitter: f32,\n }\ndiff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,2 @@\n # widgets\n-Retries back off.\n+Retries back off, with jitter.\n",
     ));
+    let h = file_hash(&s.diff.files()[1]);
+    s.store.viewed.insert(store::session_key("acme/widgets", 42), BTreeMap::from([("README.md".to_string(), h)]));
+    s.diff.set_collapsed(1, true);
+    s.toast = Some(("Approved".into(), false));
     s.chats.insert(
         "ses_demo".into(),
         Snapshot {
@@ -1178,7 +1292,13 @@ fn demo(s: &mut App) {
 
 fn main() {
     let spec = AppSpec {
-        scenes: &[("demo", demo)],
+        scenes: &[("demo", demo), ("add-repo", |s: &mut App| {
+            demo(s);
+            s.add_repo = Some(TextEdit::new(""));
+        }), ("merge", |s: &mut App| {
+            demo(s);
+            s.confirm = Some(Confirm::Merge(Some(MergeReadiness::assess(true, "MERGEABLE", "CLEAN", false, &[("ci".into(), model::CheckResult::Pending)], Some(model::MergeMethod::Squash)))));
+        })],
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),

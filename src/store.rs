@@ -14,6 +14,9 @@ pub struct Store {
     /// `"owner/name#123"` → opencode session id.
     #[serde(default)]
     pub sessions: BTreeMap<String, String>,
+    /// `"owner/name#123"` → file path → hash of that file's diff when it was marked viewed.
+    #[serde(default)]
+    pub viewed: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub fn data_dir() -> PathBuf {
