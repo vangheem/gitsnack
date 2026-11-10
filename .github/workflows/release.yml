@@ -22,7 +22,7 @@ jobs:
     name: macOS (universal)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
@@ -36,16 +36,16 @@ jobs:
           cp README.md LICENSE dist/pkg/
           tar -C dist/pkg -czf dist/gitsnack-macos-universal.tar.gz .
           shasum -a 256 dist/gitsnack-macos-universal.tar.gz | sed 's|dist/||' > dist/gitsnack-macos-universal.tar.gz.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/gitsnack-macos-universal.tar.gz*
 
   linux:
     name: Linux x86_64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
@@ -55,7 +55,7 @@ jobs:
           cp target/release/gitsnack README.md LICENSE dist/pkg/
           tar -C dist/pkg -czf dist/gitsnack-linux-x86_64.tar.gz .
           sha256sum dist/gitsnack-linux-x86_64.tar.gz | sed 's|dist/||' > dist/gitsnack-linux-x86_64.tar.gz.sha256
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/gitsnack-linux-x86_64.tar.gz*
@@ -63,12 +63,12 @@ jobs:
   publish:
     name: Publish
     needs: [macos, linux]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
