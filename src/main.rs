@@ -18,7 +18,7 @@ use rune_kit::{Badge, BadgeVariant, Button, Checkbox, IconButton, IconButtonVari
 
 use model::{Comment, CommitSummary, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 use opencode::{Client, Entry, Snapshot};
-use store::Store;
+use store::{Draft, Store};
 
 type OnRow = Box<dyn Fn(&mut App, &mut Tx)>;
 type Job = Box<dyn FnOnce(&mut App, &mut Tx) + Send>;
@@ -85,6 +85,8 @@ struct App {
     composer: TextEdit,
     review: TextEdit,
     comment: TextEdit,
+    /// The inline composer opened from a diff line's "+".
+    composing: Option<(LineRange, TextEdit)>,
     busy: bool,
     confirm: Option<Confirm>,
     add_repo: Option<TextEdit>,
@@ -131,6 +133,7 @@ fn init() -> App {
         composer: TextEdit::new(""),
         review: TextEdit::new(""),
         comment: TextEdit::new(""),
+        composing: None,
         busy: false,
         confirm: None,
         add_repo: None,
@@ -186,25 +189,94 @@ impl App {
         self.diff = DiffState::new(files);
     }
 
-    /// Puts each inline comment thread under its line in the diff.
+    /// Places comment threads, pending review comments and the open composer under their lines.
+    /// Ids: `c:1,2` (comment indexes), `d:0` (draft index), `compose`.
     fn annotate(&mut self) {
-        let Some(d) = &self.detail else { return };
         let mut by_line: BTreeMap<(usize, bool, u32), Vec<usize>> = BTreeMap::new();
-        for (i, c) in d.comments.iter().enumerate() {
-            let (Some(path), Some(line)) = (&c.path, c.line) else { continue };
-            if let Some(file) = self.diff.file_index(path) {
-                by_line.entry((file, c.left, line)).or_default().push(i);
+        if let Some(d) = &self.detail {
+            for (i, c) in d.comments.iter().enumerate() {
+                let (Some(path), Some(line)) = (&c.path, c.line) else { continue };
+                if let Some(file) = self.diff.file_index(path) {
+                    by_line.entry((file, c.left, line)).or_default().push(i);
+                }
             }
         }
-        let notes = by_line
+        let at = |left: bool, line: u32| LineRef::new(if left { Side::Old } else { Side::New }, line);
+        let mut notes: Vec<Annotation> = by_line
             .into_iter()
             .map(|((file, left, line), ids)| {
-                let side = if left { Side::Old } else { Side::New };
                 let id = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-                Annotation::new(file, LineRef::new(side, line), id)
+                Annotation::new(file, at(left, line), format!("c:{id}"))
             })
             .collect();
+        for (i, d) in self.drafts().iter().enumerate() {
+            if let Some(file) = self.diff.file_index(&d.path) {
+                notes.push(Annotation::new(file, at(d.left, d.end), format!("d:{i}")));
+            }
+        }
+        if let Some((r, _)) = &self.composing {
+            notes.push(Annotation::new(r.file, r.end, "compose"));
+        }
         self.diff.set_annotations(notes);
+    }
+
+    fn drafts(&self) -> &[Draft] {
+        self.pr_key().and_then(|k| self.store.drafts.get(&k)).map_or(&[], Vec::as_slice)
+    }
+
+    fn open_composer(&mut self, lines: LineRange) {
+        let mut edit = TextEdit::new("");
+        edit.focused = true;
+        self.composing = Some((lines, edit));
+        self.annotate();
+    }
+
+    fn close_composer(&mut self) {
+        self.composing = None;
+        self.annotate();
+    }
+
+    /// Adds the composer's text to the pending review as a comment on its lines.
+    fn add_draft(&mut self) {
+        let (Some(key), Some((r, edit))) = (self.pr_key(), self.composing.clone()) else { return };
+        let body = edit.text.trim().to_string();
+        let Some(file) = self.diff.files().get(r.file) else { return };
+        if body.is_empty() {
+            return;
+        }
+        let (a, b) = (r.start.line.min(r.end.line), r.start.line.max(r.end.line));
+        let draft = Draft { path: file.path().to_string(), start: a, end: b, left: r.end.side == Side::Old, body };
+        self.store.drafts.entry(key).or_default().push(draft);
+        self.save();
+        self.composing = None;
+        self.annotate();
+    }
+
+    fn remove_draft(&mut self, i: usize) {
+        let Some(key) = self.pr_key() else { return };
+        if let Some(list) = self.store.drafts.get_mut(&key) {
+            if i < list.len() {
+                list.remove(i);
+            }
+            if list.is_empty() {
+                self.store.drafts.remove(&key);
+            }
+        }
+        self.save();
+        self.annotate();
+    }
+
+    /// Sends the composer's text and line reference to the agent instead.
+    fn composer_to_agent(&mut self) {
+        let Some((r, edit)) = self.composing.take() else { return };
+        self.ask_about(r);
+        let extra = edit.text.trim();
+        if !extra.is_empty() {
+            let t = format!("{}{extra}", self.composer.text);
+            self.composer = TextEdit::new(t);
+            self.composer.focused = true;
+        }
+        self.annotate();
     }
 
     fn reload_comments(&mut self) {
@@ -333,6 +405,7 @@ impl App {
         self.browse = None;
         self.target = Some(target.clone());
         self.set_diff(Vec::new());
+        self.composing = None;
         self.diff_loading = true;
         self.diff_error = None;
         self.detail = None;
@@ -517,22 +590,40 @@ impl App {
     fn submit_review(&mut self, kind: ReviewKind) {
         let Some(Target::Pr(slug, n)) = self.target.clone() else { return };
         let body = self.review.text.trim().to_string();
-        if kind.needs_body() && body.is_empty() {
-            self.notify("Write a review body first", true);
+        let drafts = self.drafts().to_vec();
+        if kind.needs_body() && body.is_empty() && drafts.is_empty() {
+            self.notify("Write a review body or add line comments first", true);
             return;
         }
+        let commit = self.detail.as_ref().map(|d| d.head_sha.clone()).unwrap_or_default();
+        let key = self.pr_key();
         self.busy = true;
-        self.bg(move || gh::review_pr(&slug, n, kind, &body).map(|_| slug), move |s, res, _| {
-            s.busy = false;
-            match res {
-                Ok(slug) => {
-                    s.review = TextEdit::new("");
-                    s.notify(kind.submitted(), false);
-                    s.refresh_repo(&slug);
+        self.bg(
+            move || {
+                if drafts.is_empty() {
+                    gh::review_pr(&slug, n, kind, &body)
+                } else {
+                    gh::submit_review(&slug, n, kind, &body, &commit, &drafts)
                 }
-                Err(e) => s.notify(e.to_string(), true),
-            }
-        });
+                .map(|_| slug)
+            },
+            move |s, res, _| {
+                s.busy = false;
+                match res {
+                    Ok(slug) => {
+                        s.review = TextEdit::new("");
+                        if let Some(k) = key {
+                            s.store.drafts.remove(&k);
+                            s.save();
+                        }
+                        s.notify(kind.submitted(), false);
+                        s.refresh_repo(&slug);
+                        s.reload_comments();
+                    }
+                    Err(e) => s.notify(e.to_string(), true),
+                }
+            },
+        );
     }
 
     fn check_merge(&mut self) {
@@ -810,20 +901,10 @@ fn toolbar_actions(s: &App, k: &Kit) -> El {
         );
     }
     let open = s.inspector.is_open();
-    r = r.child(
-        IconButton::new(&shell::INSPECTOR)
-            .variant(IconButtonVariant::GhostMuted)
-            .expanded(open)
-            .label(if open { "Hide panel" } else { "Show panel" })
-            .shortcut("⌘I")
-            .on_press(|s: &mut App| s.inspector.toggle())
-            .build(k)
-            .key("inspector-toggle"),
-    );
     r.child(
         Button::new("Refresh")
             .variant(ButtonVariant::Ghost)
-                    .control_size(ControlSize::Small)
+            .control_size(ControlSize::Small)
             .shortcut("⌘R")
             .on_press_tx(|s: &mut App, tx| {
                 for slug in s.store.repos.clone() {
@@ -832,6 +913,16 @@ fn toolbar_actions(s: &App, k: &Kit) -> El {
                 s.refresh_target(tx);
             })
             .build(k),
+    )
+    .child(
+        IconButton::new(&shell::INSPECTOR)
+            .variant(IconButtonVariant::GhostMuted)
+            .expanded(open)
+            .label(if open { "Hide panel" } else { "Show panel" })
+            .shortcut("⌘I")
+            .on_press(|s: &mut App| s.inspector.toggle())
+            .build(k)
+            .key("inspector-toggle"),
     )
 }
 
@@ -950,23 +1041,12 @@ fn main_pane(s: &App, k: &Kit) -> El {
     let mut dv = DiffView::new(|s: &App| &s.diff, |s: &mut App| &mut s.diff);
     if matches!(target, Target::Pr(..)) {
         let kc = k.clone();
-        dv = dv.on_comment(|s: &mut App, lines, _| s.ask_about(lines)).header_actions(move |s: &App, i| {
+        dv = dv.on_comment(|s: &mut App, lines, _| s.open_composer(lines)).header_actions(move |s: &App, i| {
             Checkbox::new(s.is_viewed(i)).label("Viewed").on_toggle(move |s: &mut App| s.toggle_viewed(i)).build(&kc)
         });
     }
-    if let Some(d) = &s.detail {
-        let kc = k.clone();
-        let comments = d.comments.clone();
-        dv = dv.annotation(move |_: &App, a: &Annotation| {
-            let mut thread = col().w_full().gap(8.0).padding(10.0).radius(8.0).fill(kc.c.layer_01).border(1.0, kc.c.border_muted);
-            for id in a.id.split(',').filter_map(|i| i.parse::<usize>().ok()) {
-                if let Some(c) = comments.get(id) {
-                    thread = thread.child(comment_card(&kc, c, false));
-                }
-            }
-            col().w_full().px(12.0).py(6.0).child(thread)
-        });
-    }
+    let kc = k.clone();
+    dv = dv.annotation(move |s: &App, a: &Annotation| annotation(s, &kc, a));
     dv = dv.on_visible_file(|s: &mut App, i| {
         if let Some(path) = s.diff.files().get(i).map(|f| f.path().to_string()) {
             s.files.select(&path);
@@ -1010,6 +1090,67 @@ fn file_tree(s: &App, k: &Kit) -> El {
         .border_sides([0.0, 1.0, 0.0, 0.0], k.c.border_muted)
         .child(text(format!("{} changed files", s.diff.files().len())).font(k.ty.small_medium).color(k.c.text_muted).px(6.0).py(4.0))
         .child(tree)
+}
+
+fn annotation(s: &App, k: &Kit, a: &Annotation) -> El {
+    let frame = |inner: El| col().w_full().px(12.0).py(6.0).child(inner);
+    let card = || col().w_full().gap(8.0).padding(10.0).radius(8.0).fill(k.c.layer_01).border(1.0, k.c.border_muted);
+    if a.id == "compose" {
+        let Some((_, edit)) = &s.composing else { return col() };
+        let empty = edit.text.trim().is_empty();
+        let actions = row()
+            .w_full()
+            .gap(8.0)
+            .child(row().grow(1.0))
+            .child(Button::new("Cancel").variant(ButtonVariant::Ghost).control_size(ControlSize::Small).on_press(|s: &mut App| s.close_composer()).build(k))
+            .child(Button::new("Ask agent").variant(ButtonVariant::Outline).control_size(ControlSize::Small).on_press(|s: &mut App| s.composer_to_agent()).build(k))
+            .child(
+                Button::new("Add review comment")
+                    .variant(ButtonVariant::Contrast)
+                    .control_size(ControlSize::Small)
+                    .disabled(empty)
+                    .on_press(|s: &mut App| s.add_draft())
+                    .build(k),
+            );
+        let input = TextArea::new(edit)
+            .placeholder("Leave a comment on these lines… (⌘Enter to add to the review)")
+            .auto_grow(3, 12)
+            .width(None)
+            .on_edit(|s: &mut App| &mut s.composing.as_mut().expect("composer open").1)
+            .on_key(|s: &mut App, ev: &KeyEvent, _: &mut Tx| {
+                if ev.key == rune::Key::Escape {
+                    s.close_composer();
+                    return true;
+                }
+                if ev.key == rune::Key::Enter && ev.mods.cmd {
+                    s.add_draft();
+                    return true;
+                }
+                false
+            })
+            .build(k);
+        return frame(card().border(1.0, k.c.border_focus).child(input).child(actions));
+    }
+    if let Some(i) = a.id.strip_prefix("d:").and_then(|i| i.parse::<usize>().ok()) {
+        let Some(d) = s.drafts().get(i) else { return col() };
+        let head = row()
+            .w_full()
+            .gap(8.0)
+            .items_center()
+            .child(Badge::new("Pending").variant(BadgeVariant::Accent).build(k))
+            .child(text("Your review comment").font(k.ty.small_medium).color(k.c.text_muted))
+            .child(row().grow(1.0))
+            .child(Button::new("Delete").variant(ButtonVariant::GhostFaint).control_size(ControlSize::Small).on_press(move |s: &mut App| s.remove_draft(i)).build(k));
+        return frame(card().child(head).child(Markdown::new(d.body.clone()).selectable(true).build(k)));
+    }
+    let Some(d) = &s.detail else { return col() };
+    let mut thread = card();
+    for id in a.id.trim_start_matches("c:").split(',').filter_map(|i| i.parse::<usize>().ok()) {
+        if let Some(c) = d.comments.get(id) {
+            thread = thread.child(comment_card(k, c, false));
+        }
+    }
+    frame(thread)
 }
 
 fn comment_card(k: &Kit, c: &Comment, show_path: bool) -> El {
@@ -1408,23 +1549,69 @@ fn comments_panel(s: &App, k: &Kit) -> El {
 }
 
 fn review_panel(s: &App, k: &Kit) -> El {
+    let drafts = s.drafts();
     let btn = |label: &'static str, kind: ReviewKind, v: ButtonVariant| {
         Button::new(label).variant(v).disabled(s.busy).on_press(move |s: &mut App| s.submit_review(kind)).build(k)
     };
+    let mut pending = col().w_full().gap(6.0);
+    if drafts.is_empty() {
+        pending = pending.child(
+            text("No line comments yet. Hover a line in the diff and click “+” to add one to this review.")
+                .font(k.ty.small)
+                .color(k.c.text_faint)
+                .wrap(),
+        );
+    }
+    for (i, d) in drafts.iter().enumerate() {
+        let at = if d.start == d.end { format!("{}:{}", d.path, d.end) } else { format!("{}:{}-{}", d.path, d.start, d.end) };
+        let (path, line, left) = (d.path.clone(), d.end, d.left);
+        let item = row()
+            .w_full()
+            .gap(8.0)
+            .px(10.0)
+            .py(8.0)
+            .radius(6.0)
+            .fill(k.c.layer_01)
+            .items_center()
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(2.0)
+                    .child(text(at).font(k.ty.mono).color(k.c.text_muted).truncate())
+                    .child(text(d.body.clone()).font(k.ty.ui).color(k.c.text_base).max_lines(2)),
+            )
+            .child(Button::new("Delete").variant(ButtonVariant::GhostFaint).control_size(ControlSize::Small).on_press(move |s: &mut App| s.remove_draft(i)).build(k))
+            .on_press_tx(move |s: &mut App, tx| {
+                if let Some(f) = s.diff.file_index(&path) {
+                    s.diff.set_collapsed(f, false);
+                    s.diff.scroll_to_line(f, LineRef::new(if left { Side::Old } else { Side::New }, line), tx);
+                }
+            });
+        pending = pending.child(k.interactive(item).key(format!("draft{i}")));
+    }
+    let title = if drafts.is_empty() { "Line comments".to_string() } else { format!("Line comments ({} pending)", drafts.len()) };
     col()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .padding(12.0)
-        .gap(10.0)
-        .child(text("Review body (markdown)").font(k.ty.ui_medium).color(k.c.text_muted))
-        .child(TextArea::new(&s.review).placeholder("Leave a review…").rows(14).width(None).on_edit(|s: &mut App| &mut s.review).build(k))
+        .scroll(ScrollSpec { stick_bottom: false })
         .child(
-            row()
-                .gap(8.0)
-                .child(btn("Comment", ReviewKind::Comment, ButtonVariant::Outline))
-                .child(btn("Approve", ReviewKind::Approve, ButtonVariant::Submit))
-                .child(btn("Request changes", ReviewKind::RequestChanges, ButtonVariant::Danger)),
+            col()
+                .w_full()
+                .padding(12.0)
+                .gap(10.0)
+                .child(text(title).font(k.ty.ui_medium).color(k.c.text_muted))
+                .child(pending)
+                .child(text("Review summary (markdown)").font(k.ty.ui_medium).color(k.c.text_muted).pt(6.0))
+                .child(TextArea::new(&s.review).placeholder("Leave a review…").rows(10).width(None).on_edit(|s: &mut App| &mut s.review).build(k))
+                .child(
+                    row()
+                        .gap(8.0)
+                        .child(btn("Comment", ReviewKind::Comment, ButtonVariant::Outline))
+                        .child(btn("Approve", ReviewKind::Approve, ButtonVariant::Submit))
+                        .child(btn("Request changes", ReviewKind::RequestChanges, ButtonVariant::Danger)),
+                ),
         )
 }
 
@@ -1597,6 +1784,15 @@ fn main() {
         scenes: &[("demo", demo), ("add-repo", |s: &mut App| {
             demo(s);
             s.add_repo = Some(TextEdit::new(""));
+        }), ("line-review", |s: &mut App| {
+            demo(s);
+            s.toast = None;
+            s.panel = Panel::Review;
+            s.store.drafts.insert(
+                store::session_key("acme/widgets", 42),
+                vec![Draft { path: "src/retry.rs".into(), start: 3, end: 3, left: false, body: "Can `max` be `Option`?".into() }],
+            );
+            s.open_composer(LineRange::line(0, LineRef::new(Side::New, 2)));
         }), ("comments", |s: &mut App| {
             demo(s);
             s.panel = Panel::Comments;

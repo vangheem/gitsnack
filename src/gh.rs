@@ -8,6 +8,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::store::Draft;
 use crate::model::{CheckResult, Comment, MergeMethod, MergeReadiness, PrDetail, PullRequest, ReviewKind, ReviewState};
 
 pub fn clone(slug: &str, dir: &Path) -> Result<()> {
@@ -160,6 +161,37 @@ pub fn review_pr(slug: &str, number: u64, kind: ReviewKind, body: &str) -> Resul
         args.extend(["--body-file", "-"]);
     }
     gh(&args, (!body.is_empty()).then_some(body))?;
+    Ok(())
+}
+
+/// One review with its line comments, as GitHub's review API takes it.
+pub fn submit_review(slug: &str, number: u64, kind: ReviewKind, body: &str, commit: &str, drafts: &[Draft]) -> Result<()> {
+    let event = match kind {
+        ReviewKind::Comment => "COMMENT",
+        ReviewKind::Approve => "APPROVE",
+        ReviewKind::RequestChanges => "REQUEST_CHANGES",
+    };
+    let comments: Vec<Value> = drafts
+        .iter()
+        .map(|d| {
+            let side = if d.left { "LEFT" } else { "RIGHT" };
+            let mut c = serde_json::json!({ "path": d.path, "line": d.end, "side": side, "body": d.body });
+            if d.start != d.end {
+                c["start_line"] = d.start.into();
+                c["start_side"] = side.into();
+            }
+            c
+        })
+        .collect();
+    let mut payload = serde_json::json!({ "event": event, "comments": comments });
+    if !body.is_empty() {
+        payload["body"] = body.into();
+    }
+    if !commit.is_empty() {
+        payload["commit_id"] = commit.into();
+    }
+    let api = format!("repos/{slug}/pulls/{number}/reviews");
+    gh(&["api", &api, "--method", "POST", "--input", "-"], Some(&payload.to_string()))?;
     Ok(())
 }
 

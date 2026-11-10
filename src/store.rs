@@ -17,6 +17,19 @@ pub struct Store {
     /// `"owner/name#123"` → file path → hash of that file's diff when it was marked viewed.
     #[serde(default)]
     pub viewed: BTreeMap<String, BTreeMap<String, String>>,
+    /// `"owner/name#123"` → line comments waiting to be submitted with the next review.
+    #[serde(default)]
+    pub drafts: BTreeMap<String, Vec<Draft>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Draft {
+    pub path: String,
+    pub start: u32,
+    pub end: u32,
+    /// On the old side of the diff (a removed line).
+    pub left: bool,
+    pub body: String,
 }
 
 pub fn data_dir() -> PathBuf {
