@@ -76,7 +76,9 @@ macOS is the main target. Linux builds are provided too; "Open in terminal" is m
 brew install vangheem/tap/gitsnack
 ```
 
-This also installs `gh`. Upgrade with `brew upgrade gitsnack`.
+This also installs `gh`. gitsnack checks for new releases at launch and every few hours; when
+there is one, an "Update available" row appears at the bottom of the sidebar, and **Update and
+restart** runs `brew upgrade` and reopens it. `brew upgrade gitsnack` works too.
 
 #### As a Mac app
 

@@ -26,6 +26,9 @@ pub struct Store {
     /// The user chose "Don't ask again" for adding gitsnack.app to ~/Applications.
     #[serde(default)]
     pub skip_app_prompt: bool,
+    /// A release the user chose to skip ("v0.4.0").
+    #[serde(default)]
+    pub skipped_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

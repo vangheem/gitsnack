@@ -7,6 +7,7 @@ mod git;
 mod model;
 mod opencode;
 mod store;
+mod update;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -78,6 +79,7 @@ enum Confirm {
     Draft(bool),
     Checks,
     InstallApp,
+    Update,
 }
 
 struct App {
@@ -118,6 +120,12 @@ struct App {
     toast: Option<(String, bool)>,
     toast_until: Option<f64>,
     next_checks_poll: f64,
+    /// A newer release's tag, when there is one the user hasn't skipped.
+    update: Option<String>,
+    /// "Later": hide the update row until the next launch.
+    update_hidden: bool,
+    updating: bool,
+    next_update_check: f64,
     /// Comments posted from here that GitHub's reads may not return yet.
     posted: Vec<Comment>,
     next_repo_refresh: Option<f64>,
@@ -199,6 +207,10 @@ fn init() -> App {
         toast: None,
         toast_until: None,
         next_checks_poll: 0.0,
+        update: None,
+        update_hidden: false,
+        updating: false,
+        next_update_check: 0.0,
         posted: Vec::new(),
         next_repo_refresh: None,
     }
@@ -957,6 +969,37 @@ impl App {
         );
     }
 
+    fn check_for_update(&mut self) {
+        self.bg(update::latest_release, |s, res, _| {
+            // Offline or rate limited: say nothing, and try again at the next check.
+            let Ok(tag) = res else { return };
+            let newer = update::is_newer(&tag, update::current());
+            let skipped = s.store.skipped_version.as_deref() == Some(tag.as_str());
+            s.update = (newer && !skipped).then_some(tag);
+        });
+    }
+
+    /// `brew upgrade` gitsnack, then start the new version and quit this one.
+    fn run_update(&mut self) {
+        let Some(prefix) = update::brew_prefix() else {
+            return;
+        };
+        self.updating = true;
+        self.bg(
+            move || update::brew_upgrade(&prefix).and_then(|_| update::relaunch()),
+            |s, res, tx| {
+                s.updating = false;
+                match res {
+                    Ok(()) => tx.quit(),
+                    Err(e) => {
+                        s.confirm = None;
+                        s.notify(format!("Update failed: {e:#}"), true);
+                    }
+                }
+            },
+        );
+    }
+
     fn install_app(&mut self) {
         self.confirm = None;
         self.bg(appbundle::install, |s, res, _| match res {
@@ -1211,6 +1254,12 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
         }
     } else {
         s.next_checks_poll = 0.0;
+    }
+    // Look for a newer release at launch and every few hours (not in headless renders).
+    if now >= s.next_update_check && rune::tooling::headless_run().is_none() {
+        s.next_update_check = now + update::CHECK_EVERY_SECS;
+        tx.wake_after(Duration::from_secs_f64(update::CHECK_EVERY_SECS));
+        s.check_for_update();
     }
     // Status messages linger a few seconds (errors longer), then go.
     if s.toast.is_some() {
@@ -1533,6 +1582,16 @@ fn sidebar(s: &App, k: &Kit) -> El {
                         .build(k),
                 )
                 .rows(rows),
+        );
+    }
+    if let (Some(tag), false) = (&s.update, s.update_hidden) {
+        sb = sb.footer(
+            SidebarRow::new(format!("Update available: {tag}"))
+                .icon(&rune_kit::glyphs::SPARKLE)
+                .height(36.0)
+                .on_select(|s: &mut App, _| s.confirm = Some(Confirm::Update))
+                .build(k)
+                .key("update-available"),
         );
     }
     sb.build(k)
@@ -2903,6 +2962,76 @@ fn dialogs(s: &App, k: &Kit, layer: &mut Vec<El>) {
             );
         }
         Some(Confirm::Checks) => checks_dialog(s, k, layer),
+        Some(Confirm::Update) => {
+            let Some(tag) = s.update.clone() else { return };
+            let notes = format!("https://github.com/{}/releases/tag/{tag}", update::REPO);
+            let brew = update::brew_prefix().is_some();
+            let mut body = vec![
+                text(format!(
+                    "gitsnack {tag} is available. You have v{}.",
+                    update::current()
+                ))
+                .font(k.ty.ui)
+                .color(k.c.text_base)
+                .wrap(),
+            ];
+            if s.updating {
+                body.push(
+                    row()
+                        .gap(10.0)
+                        .items_center()
+                        .child(Spinner::new().build(k))
+                        .child(
+                            text("Updating with Homebrew…")
+                                .font(k.ty.ui)
+                                .color(k.c.text_muted),
+                        ),
+                );
+            } else if !brew {
+                body.push(
+                    text("This copy wasn't installed with Homebrew, so update it the way you installed it: download the new release, or `git pull && make install` from a checkout.")
+                        .font(k.ty.ui)
+                        .color(k.c.text_muted)
+                        .wrap(),
+                );
+            }
+            let open_notes = Button::new("Release notes")
+                .variant(ButtonVariant::Ghost)
+                .on_press_tx(move |_: &mut App, tx| {
+                    let _ = tx.open_url(&notes);
+                })
+                .build(k);
+            let skip_tag = tag.clone();
+            let skip = Button::new("Skip this version")
+                .variant(ButtonVariant::Ghost)
+                .disabled(s.updating)
+                .on_press(move |s: &mut App| {
+                    s.store.skipped_version = Some(skip_tag.clone());
+                    s.save();
+                    s.update = None;
+                    s.confirm = None;
+                })
+                .build(k);
+            let later = Button::new("Later")
+                .variant(ButtonVariant::Ghost)
+                .disabled(s.updating)
+                .on_press(|s: &mut App| {
+                    s.update_hidden = true;
+                    s.confirm = None;
+                })
+                .build(k);
+            let mut actions = vec![open_notes, skip, later];
+            if brew {
+                actions.push(
+                    Button::new("Update and restart")
+                        .variant(ButtonVariant::Contrast)
+                        .disabled(s.updating)
+                        .on_press(|s: &mut App| s.run_update())
+                        .build(k),
+                );
+            }
+            modal("update", "Update gitsnack", None, body, actions, k, layer);
+        }
         Some(Confirm::InstallApp) => {
             let never = Button::new("Don't ask again")
                 .variant(ButtonVariant::Ghost)
@@ -3281,6 +3410,12 @@ fn main() {
                         permissions: Vec::new(),
                     },
                 );
+            }),
+            ("update", |s: &mut App| {
+                demo(s);
+                s.toast = None;
+                s.update = Some("v9.0.0".into());
+                s.confirm = Some(Confirm::Update);
             }),
             ("comments", |s: &mut App| {
                 demo(s);
