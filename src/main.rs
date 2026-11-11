@@ -605,12 +605,23 @@ impl App {
             .and_then(|s| self.repos.get(&s))
             .map(|r| r.default_branch.clone())
             .unwrap_or_default();
+        let base = self.pr().map(|p| p.base_ref.clone());
         let t = target.clone();
         self.bg(
             move || -> anyhow::Result<Loaded> {
                 Ok(match &t {
                     Target::Pr(slug, n) => {
-                        (gh::pr_diff(slug, *n)?, gh::pr_detail(slug, *n).ok(), None)
+                        // The local clone has no size limit; GitHub's diff API stops at 300
+                        // files or 20,000 lines. Fall back to it if the clone can't do it.
+                        let local = base
+                            .as_deref()
+                            .ok_or_else(|| anyhow::anyhow!("unknown base branch"))
+                            .and_then(|b| git::pr_diff(&store::clone_dir(slug), *n, b));
+                        let patch = match local {
+                            Ok(p) => p,
+                            Err(_) => gh::pr_diff(slug, *n)?,
+                        };
+                        (patch, gh::pr_detail(slug, *n).ok(), None)
                     }
                     Target::Branch(slug, b) => (
                         git::branch_diff(&store::clone_dir(slug), &default, b)?,
@@ -3477,7 +3488,19 @@ mod tests {
         git::list_branches(&dir, &default).unwrap();
         let prs = gh::list_prs(slug).unwrap();
         if let Some(pr) = prs.first() {
-            assert!(!parse(&gh::pr_diff(slug, pr.number).unwrap()).is_empty());
+            let remote: Vec<String> = parse(&gh::pr_diff(slug, pr.number).unwrap())
+                .iter()
+                .map(|f| f.path().to_string())
+                .collect();
+            let local: Vec<String> = parse(&git::pr_diff(&dir, pr.number, &pr.base_ref).unwrap())
+                .iter()
+                .map(|f| f.path().to_string())
+                .collect();
+            assert!(!local.is_empty());
+            assert_eq!(
+                local, remote,
+                "local PR diff covers the same files as GitHub's"
+            );
             gh::pr_detail(slug, pr.number).unwrap();
         }
         println!(

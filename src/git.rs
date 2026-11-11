@@ -126,6 +126,26 @@ pub fn branch_diff(dir: &Path, default: &str, branch: &str) -> Result<String> {
     )
 }
 
+/// A PR's diff from the local clone: fetches GitHub's `refs/pull/<n>/head` (forks included)
+/// and the base branch, then diffs from their merge base, as GitHub's "Files changed" does.
+/// Unlike GitHub's diff API this has no size limit.
+pub fn pr_diff(dir: &Path, number: u64, base: &str) -> Result<String> {
+    let pr_ref = format!("refs/remotes/origin/pr/{number}");
+    let base_ref = format!("refs/remotes/origin/{base}");
+    git_ok(
+        dir,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "origin",
+            &format!("+refs/pull/{number}/head:{pr_ref}"),
+            &format!("+refs/heads/{base}:{base_ref}"),
+        ],
+    )?;
+    range_diff(dir, &base_ref, &pr_ref)
+}
+
 pub fn range_diff(dir: &Path, base: &str, head: &str) -> Result<String> {
     git_ok(
         dir,
