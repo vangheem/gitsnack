@@ -40,10 +40,19 @@ at.
   selected lines.
 - Merge after a check of approval, CI and merge rules; switch a PR between draft and ready.
 
+**Commits and CI**
+- Commits on the default branch show a CI status dot, so failing commits stand out.
+- Opening a commit shows its message, diff and CI. Click the CI status for every Actions job
+  and status check on it, with links to their GitHub pages.
+- Each commit gets its own agent session that knows the commit and its failing checks.
+  **Fix CI** reads the failing logs, fixes the problem on a `gitsnack/fix-ci-…` branch, runs the
+  checks locally and opens a draft PR. It never pushes to the default branch, and it suggests a
+  re-run instead when the failure looks flaky. **Explain failure** only diagnoses.
+
 **Agent**
 - Each PR gets its own opencode session, run in gitsnack's clone of the repo. Its first
   prompt tells the agent which PR to check out and not to change anything on GitHub.
-- Presets: Review, Summarize, Risks, Back-compat, Tests. Or ask anything, or send a
+- PR presets: Review, Summarize, Risks, Back-compat, Tests. Or ask anything, or send a
   diff line to the agent with **Ask agent**.
 - Pick the model sessions use (saved across restarts). Approve or reject tool permission
   requests inline.

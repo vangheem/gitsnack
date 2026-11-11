@@ -34,6 +34,8 @@ use model::{
 use opencode::{Client, Entry, Snapshot};
 use store::{Draft, ModelRef, Store};
 
+/// A target's patch, its PR or commit detail, and a commit's summary and message.
+type Loaded = (String, Option<PrDetail>, Option<(CommitSummary, String)>);
 type OnRow = Box<dyn Fn(&mut App, &mut Tx)>;
 type Job = Box<dyn FnOnce(&mut App, &mut Tx) + Send>;
 
@@ -57,6 +59,8 @@ struct Repo {
     branches: Vec<String>,
     commits: Vec<CommitSummary>,
     default_branch: String,
+    /// Combined CI state of the default branch's newest commits, by SHA.
+    ci: HashMap<String, CheckResult>,
     loading: bool,
     error: Option<String>,
     collapsed: bool,
@@ -99,6 +103,8 @@ struct App {
     chat_inflight: bool,
     next_chat_poll: f64,
     composer: TextEdit,
+    /// The open commit's summary and message body.
+    commit: Option<(CommitSummary, String)>,
     models: Vec<ComboboxOption>,
     models_loading: bool,
     model_combo: ComboboxState,
@@ -180,6 +186,7 @@ fn init() -> App {
         chat_inflight: false,
         next_chat_poll: 0.0,
         composer: TextEdit::new(""),
+        commit: None,
         models: Vec::new(),
         models_loading: false,
         model_combo: ComboboxState::default(),
@@ -366,7 +373,27 @@ impl App {
 
     /// Re-reads the PR's comments. GitHub's reads lag its writes by a moment, so after posting,
     /// `after` delays the read and comments posted from here that it doesn't have yet are kept.
-    fn reload_comments(&mut self, after: Duration) {
+    fn reload_detail(&mut self, after: Duration) {
+        if let Some(Target::Commit(slug, sha)) = self.target.clone() {
+            let target = self.target.clone();
+            self.bg(
+                move || gh::commit_checks(&slug, &sha),
+                move |s, res, _| {
+                    if s.target != target {
+                        return;
+                    }
+                    match res {
+                        Ok(checks) => {
+                            if let Some(d) = &mut s.detail {
+                                d.checks = checks;
+                            }
+                        }
+                        Err(e) => s.notify(e.to_string(), true),
+                    }
+                },
+            );
+            return;
+        }
         let Some(Target::Pr(slug, n)) = self.target.clone() else {
             return;
         };
@@ -410,7 +437,7 @@ impl App {
         }
         self.posted.push(c);
         self.annotate();
-        self.reload_comments(Duration::from_secs(3));
+        self.reload_detail(Duration::from_secs(3));
     }
 
     /// Posts the composer as a PR comment, or on the selected diff lines when there are some.
@@ -488,14 +515,17 @@ impl App {
         self.save();
     }
 
+    /// Which agent session the open target uses: one per PR, and one per commit.
+    fn agent_key(&self) -> Option<String> {
+        match self.target.as_ref()? {
+            Target::Pr(slug, n) => Some(store::session_key(slug, *n)),
+            Target::Commit(slug, sha) => Some(format!("{slug}@{sha}")),
+            _ => None,
+        }
+    }
+
     fn session_id(&self) -> Option<String> {
-        let Some(Target::Pr(slug, n)) = &self.target else {
-            return None;
-        };
-        self.store
-            .sessions
-            .get(&store::session_key(slug, *n))
-            .cloned()
+        self.store.sessions.get(&self.agent_key()?).cloned()
     }
 
     /// Clones (first time), fetches, and lists PRs, branches and commits for a repo.
@@ -520,7 +550,8 @@ impl App {
                     let prs = gh::list_prs(&slug)?;
                     let branches = git::list_branches(&dir, &default).unwrap_or_default();
                     let commits = git::list_commits(&dir, &default, 200).unwrap_or_default();
-                    Ok((prs, branches, commits, default))
+                    let ci = gh::branch_ci(&slug, &default).unwrap_or_default();
+                    Ok((prs, branches, commits, default, ci))
                 }
             },
             move |s, res, _| {
@@ -529,7 +560,8 @@ impl App {
                 };
                 r.loading = false;
                 match res {
-                    Ok((prs, branches, commits, default)) => {
+                    Ok((prs, branches, commits, default, ci)) => {
+                        r.ci = ci;
                         r.prs = prs;
                         r.branches = branches;
                         r.commits = commits;
@@ -550,6 +582,7 @@ impl App {
         self.diff_loading = true;
         self.diff_error = None;
         self.detail = None;
+        self.commit = None;
         self.next_chat_poll = 0.0;
         if !matches!(target, Target::Pr(..)) {
             self.panel = Panel::Agent;
@@ -562,18 +595,31 @@ impl App {
             .unwrap_or_default();
         let t = target.clone();
         self.bg(
-            move || -> anyhow::Result<(String, Option<PrDetail>)> {
+            move || -> anyhow::Result<Loaded> {
                 Ok(match &t {
-                    Target::Pr(slug, n) => (gh::pr_diff(slug, *n)?, gh::pr_detail(slug, *n).ok()),
+                    Target::Pr(slug, n) => {
+                        (gh::pr_diff(slug, *n)?, gh::pr_detail(slug, *n).ok(), None)
+                    }
                     Target::Branch(slug, b) => (
                         git::branch_diff(&store::clone_dir(slug), &default, b)?,
                         None,
+                        None,
                     ),
                     Target::Commit(slug, sha) => {
-                        (git::commit_diff(&store::clone_dir(slug), sha)?, None)
+                        let dir = store::clone_dir(slug);
+                        let detail = gh::commit_checks(slug, sha).ok().map(|checks| PrDetail {
+                            checks,
+                            head_sha: sha.clone(),
+                            ..PrDetail::default()
+                        });
+                        (
+                            git::commit_diff(&dir, sha)?,
+                            detail,
+                            git::commit_info(&dir, sha).ok(),
+                        )
                     }
                     Target::Range(slug, a, b) => {
-                        (git::range_diff(&store::clone_dir(slug), a, b)?, None)
+                        (git::range_diff(&store::clone_dir(slug), a, b)?, None, None)
                     }
                 })
             },
@@ -583,7 +629,8 @@ impl App {
                 }
                 s.diff_loading = false;
                 match res {
-                    Ok((patch, detail)) => {
+                    Ok((patch, detail, commit)) => {
+                        s.commit = commit;
                         let mode = s.diff.mode();
                         s.set_diff(parse(&patch));
                         s.diff.set_mode(mode);
@@ -663,16 +710,49 @@ impl App {
         self.oc.clone()
     }
 
-    /// Sends a prompt to the PR's session, creating the session (with PR context) first.
+    /// The title and first-prompt context for a new agent session on the open target.
+    fn agent_context(&self) -> Option<(String, String, String)> {
+        match self.target.clone()? {
+            Target::Pr(slug, n) => {
+                let pr = self.pr()?;
+                Some((
+                    slug.clone(),
+                    format!("Review {slug}#{n}: {}", pr.title),
+                    preamble(&slug, pr),
+                ))
+            }
+            Target::Commit(slug, _) => {
+                let branch = self
+                    .repos
+                    .get(&slug)
+                    .map(|r| r.default_branch.clone())
+                    .unwrap_or_else(|| "main".into());
+                let (summary, _) = self.commit.as_ref()?;
+                let checks = self
+                    .detail
+                    .as_ref()
+                    .map(|d| d.checks.as_slice())
+                    .unwrap_or_default();
+                let title = format!("CI {slug}@{}: {}", summary.short_sha, summary.subject);
+                Some((
+                    slug.clone(),
+                    title,
+                    commit_preamble(&slug, &branch, summary, checks),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// Sends a prompt to the open target's session, creating the session (with context) first.
     fn ask(&mut self, prompt: String) {
-        let Some(Target::Pr(slug, n)) = self.target.clone() else {
+        let (Some(key), Some((slug, title, context))) = (self.agent_key(), self.agent_context())
+        else {
             return;
         };
-        let Some(pr) = self.pr().cloned() else { return };
         let oc = self.client();
         let existing = self.session_id();
         let model = self.store.model.clone();
-        let key = store::session_key(&slug, n);
         self.busy = true;
         self.bg(
             move || -> anyhow::Result<(String, bool)> {
@@ -688,17 +768,10 @@ impl App {
                         }
                         (id, false)
                     }
-                    None => (
-                        oc.create_session(
-                            &format!("Review {slug}#{n}: {}", pr.title),
-                            &dir,
-                            model.as_ref(),
-                        )?,
-                        true,
-                    ),
+                    None => (oc.create_session(&title, &dir, model.as_ref())?, true),
                 };
                 let text = if fresh {
-                    format!("{}\n\n{prompt}", preamble(&slug, &pr))
+                    format!("{context}\n\n{prompt}")
                 } else {
                     prompt
                 };
@@ -876,7 +949,7 @@ impl App {
                         }
                         s.notify(kind.submitted(), false);
                         s.refresh_repo(&slug);
-                        s.reload_comments(Duration::from_secs(3));
+                        s.reload_detail(Duration::from_secs(3));
                     }
                     Err(e) => s.notify(e.to_string(), true),
                 }
@@ -987,6 +1060,84 @@ fn file_hash(f: &FileDiff) -> String {
     format!("{h:016x}")
 }
 
+/// Context for an agent working on a commit, its CI in particular. One paragraph, so the
+/// transcript can hide it like the PR context.
+fn commit_preamble(slug: &str, branch: &str, c: &CommitSummary, checks: &[Check]) -> String {
+    let failing: Vec<String> = checks
+        .iter()
+        .filter(|c| c.result == CheckResult::Fail)
+        .map(|c| {
+            if c.url.is_empty() {
+                c.name.clone()
+            } else {
+                format!("{} ({})", c.name, c.url)
+            }
+        })
+        .collect();
+    let pending = checks
+        .iter()
+        .filter(|c| c.result == CheckResult::Pending)
+        .count();
+    let ci = if checks.is_empty() {
+        "no CI checks reported".to_string()
+    } else if failing.is_empty() {
+        format!("no failing checks ({pending} pending)")
+    } else {
+        format!("failing checks: {}", failing.join("; "))
+    };
+    format!(
+        "Context: I'm looking at commit {sha} (\"{subject}\" by {author}, {date}) on the {branch} branch of {slug}, \
+         https://github.com/{slug}/commit/{sha}. CI on it: {ci}. Your working directory is a disposable clone of the \
+         repo kept by my review app; start with `git fetch origin && git checkout --detach {sha}`. Read CI logs with \
+         `gh run list --commit {sha}` and `gh run view <run-id> --log-failed`. Never push to {branch} or any other \
+         existing branch.",
+        sha = c.sha,
+        subject = c.subject,
+        author = c.author,
+        date = c.date,
+    )
+}
+
+/// Presets for an agent on a commit.
+fn commit_presets(s: &App) -> Vec<(&'static str, String)> {
+    let Some(Target::Commit(slug, sha)) = &s.target else {
+        return Vec::new();
+    };
+    let branch = s
+        .repos
+        .get(slug)
+        .map(|r| r.default_branch.clone())
+        .unwrap_or_else(|| "main".into());
+    let short = &sha[..sha.len().min(8)];
+    vec![
+        (
+            "Fix CI",
+            format!(
+                "Fix the failing CI on this commit. 1) Read the failing jobs' logs and find the root cause. \
+                 2) If it's a real problem in the code or config, create a branch `gitsnack/fix-ci-{short}` from this \
+                 commit, make the smallest fix, and run the relevant checks locally (build, tests, linters) until they \
+                 pass. 3) Commit, push that branch, and open a draft PR against {branch} with `gh pr create --draft`, \
+                 explaining the root cause and the fix. If the failure is flaky or an infrastructure problem rather \
+                 than the code, don't change anything: explain why and suggest `gh run rerun --failed <run-id>`, but \
+                 don't re-run it yourself."
+            ),
+        ),
+        (
+            "Explain failure",
+            "Explain why CI failed on this commit. Read the failing jobs' logs, find the root cause and point to the \
+             responsible code with file:line references. Say whether it's a real bug, a flaky test or an \
+             infrastructure problem. Don't change anything."
+                .to_string(),
+        ),
+        (
+            "Review",
+            "Review this commit: correctness, design, risks, and anything that should be followed up. Group findings \
+             by severity with file:line references."
+                .to_string(),
+        ),
+    ]
+}
+
 fn preamble(slug: &str, pr: &PullRequest) -> String {
     format!(
         "Context: I'm reviewing GitHub PR #{n} in {slug}: \"{title}\" by @{author} ({head} → {base}), {url}.\n\
@@ -1053,7 +1204,7 @@ fn poll(s: &mut App, now: f64, tx: &mut Tx) -> bool {
     if matches!(s.confirm, Some(Confirm::Checks)) && pending {
         if now >= s.next_checks_poll {
             if s.next_checks_poll > 0.0 {
-                s.reload_comments(Duration::ZERO);
+                s.reload_detail(Duration::ZERO);
             }
             s.next_checks_poll = now + 15.0;
             tx.wake_after(Duration::from_secs(15));
@@ -1409,6 +1560,9 @@ fn main_pane(s: &App, k: &Kit) -> El {
     {
         c = c.child(pr_header(s, k, pr));
     }
+    if let (Target::Commit(..), Some((summary, body))) = (target, &s.commit) {
+        c = c.child(commit_header(s, k, summary, body));
+    }
     if let Some(e) = &s.diff_error {
         return c.child(
             text(e.clone())
@@ -1674,6 +1828,93 @@ fn comment_card(k: &Kit, c: &Comment, show_path: bool) -> El {
     card
 }
 
+/// "CI: 2 failing ›", opening the checks dialog; none until checks are known.
+fn ci_chip(s: &App, k: &Kit) -> Option<El> {
+    let d = s.detail.as_ref()?;
+    let count = |r: CheckResult| d.checks.iter().filter(|c| c.result == r).count();
+    let (fail, pend) = (count(CheckResult::Fail), count(CheckResult::Pending));
+    if d.checks.is_empty() {
+        return Some(text("No CI checks").font(k.ty.small).color(k.c.text_faint));
+    }
+    let (label, ink) = if fail > 0 {
+        (format!("CI: {fail} failing"), k.c.danger.fg)
+    } else if pend > 0 {
+        (format!("CI: {pend} pending"), k.c.warning.fg)
+    } else {
+        ("CI passing".to_string(), k.c.success.fg)
+    };
+    let chip = row()
+        .key("ci-status")
+        .gap(4.0)
+        .px(6.0)
+        .py(2.0)
+        .radius(4.0)
+        .items_center()
+        .cursor(rune::Cursor::Pointer)
+        .role("button")
+        .label("Show CI checks")
+        .child(text(label).font(k.ty.small_medium).color(ink))
+        .child(text("›").font(k.ty.small_medium).color(ink))
+        .on_press(|s: &mut App| s.confirm = Some(Confirm::Checks));
+    Some(k.interactive(chip))
+}
+
+fn commit_header(s: &App, k: &Kit, c: &CommitSummary, body: &str) -> El {
+    let (adds, dels) = s
+        .diff
+        .files()
+        .iter()
+        .fold((0, 0), |(a, d), f| (a + f.additions(), d + f.deletions()));
+    let mut meta = row()
+        .gap(8.0)
+        .items_center()
+        .child(
+            text(c.short_sha.clone())
+                .font(k.ty.mono)
+                .color(k.c.text_muted),
+        )
+        .child(
+            text(c.author.clone())
+                .font(k.ty.small_medium)
+                .color(k.c.text_base),
+        )
+        .child(text(c.date.clone()).font(k.ty.small).color(k.c.text_muted))
+        .child(
+            text(format!("+{adds} −{dels} · {} files", s.diff.files().len()))
+                .font(k.ty.small)
+                .color(k.c.text_faint),
+        );
+    match ci_chip(s, k) {
+        Some(chip) => meta = meta.child(chip),
+        None => meta = meta.child(text("Loading CI…").font(k.ty.small).color(k.c.text_faint)),
+    }
+    let mut h = col()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(6.0)
+        .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted)
+        .child(
+            text(c.subject.clone())
+                .font(k.ty.body_medium)
+                .color(k.c.text_base)
+                .wrap(),
+        )
+        .child(meta);
+    if !body.is_empty() {
+        h = h.child(
+            col()
+                .w_full()
+                .max_h(140.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(Markdown::new(body.to_string()).selectable(true).build(k)),
+        );
+    }
+    h
+}
+
 fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
     let (adds, dels) = s
         .diff
@@ -1722,32 +1963,8 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
     if pr.is_draft {
         meta = meta.child(Badge::new("draft").variant(BadgeVariant::Subtle).build(k));
     }
-    if let Some(d) = &s.detail {
-        let count = |r: CheckResult| d.checks.iter().filter(|c| c.result == r).count();
-        let (fail, pend) = (count(CheckResult::Fail), count(CheckResult::Pending));
-        if !d.checks.is_empty() {
-            let (label, ink) = if fail > 0 {
-                (format!("CI: {fail} failing"), k.c.danger.fg)
-            } else if pend > 0 {
-                (format!("CI: {pend} pending"), k.c.warning.fg)
-            } else {
-                ("CI passing".to_string(), k.c.success.fg)
-            };
-            let chip = row()
-                .key("ci-status")
-                .gap(4.0)
-                .px(6.0)
-                .py(2.0)
-                .radius(4.0)
-                .items_center()
-                .cursor(rune::Cursor::Pointer)
-                .role("button")
-                .label("Show CI checks")
-                .child(text(label).font(k.ty.small_medium).color(ink))
-                .child(text("›").font(k.ty.small_medium).color(ink))
-                .on_press(|s: &mut App| s.confirm = Some(Confirm::Checks));
-            meta = meta.child(k.interactive(chip));
-        }
+    if let Some(chip) = ci_chip(s, k) {
+        meta = meta.child(chip);
     }
     let mut h = col()
         .w_full()
@@ -1786,27 +2003,32 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
         return col();
     };
     let mut list = col().w_full().gap(2.0).padding(12.0);
-    let line = |label: String, detail: String, extra: Option<El>, on: OnRow| {
-        let mut r = row()
-            .w_full()
-            .px(10.0)
-            .py(8.0)
-            .gap(10.0)
-            .radius(6.0)
-            .items_center()
-            .child(
-                text(label)
-                    .font(k.ty.ui)
-                    .color(k.c.text_base)
-                    .truncate()
-                    .grow(1.0),
-            )
-            .child(text(detail).font(k.ty.small).color(k.c.text_faint));
-        if let Some(e) = extra {
-            r = r.child(e);
-        }
-        k.interactive(r.on_press_tx(move |s: &mut App, tx| on(s, tx)))
-    };
+    let line =
+        |label: String, detail: String, extra: Option<El>, dot: Option<rune::Color>, on: OnRow| {
+            let mut r = row()
+                .w_full()
+                .px(10.0)
+                .py(8.0)
+                .gap(10.0)
+                .radius(6.0)
+                .items_center();
+            if let Some(c) = dot {
+                r = r.child(el().size(8.0, 8.0).radius(4.0).fill(c));
+            }
+            let mut r = r
+                .child(
+                    text(label)
+                        .font(k.ty.ui)
+                        .color(k.c.text_base)
+                        .truncate()
+                        .grow(1.0),
+                )
+                .child(text(detail).font(k.ty.small).color(k.c.text_faint));
+            if let Some(e) = extra {
+                r = r.child(e);
+            }
+            k.interactive(r.on_press_tx(move |s: &mut App, tx| on(s, tx)))
+        };
     match kind {
         Browse::Branches => {
             list = list.child(
@@ -1824,6 +2046,7 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
                     line(
                         b.clone(),
                         String::new(),
+                        None,
                         None,
                         Box::new(move |s, tx| s.open(t.clone(), tx)),
                     )
@@ -1864,6 +2087,11 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
                         c.subject.clone(),
                         format!("{} · {} · {}", c.short_sha, c.author, c.date),
                         Some(base),
+                        repo.ci.get(&c.sha).map(|r| match r {
+                            CheckResult::Pass => k.c.success.icon,
+                            CheckResult::Pending => k.c.warning.icon,
+                            CheckResult::Fail => k.c.danger.icon,
+                        }),
                         Box::new(move |s, tx| {
                             let t = match s.range_base.take() {
                                 Some(b) if b != sha => Target::Range(slug2.clone(), b, sha.clone()),
@@ -1888,9 +2116,22 @@ fn browse_list(s: &App, k: &Kit, slug: &str, kind: Browse) -> El {
 }
 
 fn inspector(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    if matches!(s.target, Some(Target::Commit(..))) {
+        let head = row()
+            .w_full()
+            .px(16.0)
+            .py(12.0)
+            .child(text("Agent").font(k.ty.ui_medium).color(k.c.text_base));
+        return col()
+            .w_full()
+            .h_full()
+            .min_h(0.0)
+            .child(head)
+            .child(agent_panel(s, k, layer));
+    }
     if !matches!(s.target, Some(Target::Pr(..))) {
         return col().w_full().h_full().padding(16.0).center().child(
-            text("Open a pull request to talk to the agent about it or review it.")
+            text("Open a pull request or a commit to work with the agent on it.")
                 .font(k.ty.ui)
                 .color(k.c.text_muted)
                 .wrap(),
@@ -1945,7 +2186,11 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     match snap {
         None if id.is_none() => {
             transcript = transcript.child(
-                text("No agent session for this PR yet. Pick a preset or ask anything; gitsnack starts an opencode session in its clone of the repo and tells the agent to check out this PR.")
+                text(if matches!(s.target, Some(Target::Commit(..))) {
+                    "No agent session for this commit yet. Pick a preset or ask anything; gitsnack starts an opencode session in its clone of the repo with this commit and its CI results as context."
+                } else {
+                    "No agent session for this PR yet. Pick a preset or ask anything; gitsnack starts an opencode session in its clone of the repo and tells the agent to check out this PR."
+                })
                     .font(k.ty.ui)
                     .color(k.c.text_muted)
                     .wrap(),
@@ -1979,13 +2224,23 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     }
 
     let mut presets = row().gap(6.0).w_full().flex_wrap();
-    for (label, prompt) in PRESETS {
+    let list: Vec<(&str, String)> = if matches!(s.target, Some(Target::Commit(..))) {
+        commit_presets(s)
+    } else {
+        PRESETS.iter().map(|(l, p)| (*l, p.to_string())).collect()
+    };
+    for (label, prompt) in list {
+        let primary = label == "Fix CI";
         presets = presets.child(
-            Button::new(*label)
-                .variant(ButtonVariant::Outline)
+            Button::new(label)
+                .variant(if primary {
+                    ButtonVariant::Contrast
+                } else {
+                    ButtonVariant::Outline
+                })
                 .control_size(ControlSize::Small)
                 .disabled(s.busy || running)
-                .on_press(move |s: &mut App| s.ask(prompt.to_string()))
+                .on_press(move |s: &mut App| s.ask(prompt.clone()))
                 .build(k),
         );
     }
@@ -2049,9 +2304,11 @@ fn agent_panel(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(presets)
         .child(
             TextArea::new(&s.composer)
-                .placeholder(
-                    "Ask the agent about this PR… (Enter to send, Shift-Enter for a newline)",
-                )
+                .placeholder(if matches!(s.target, Some(Target::Commit(..))) {
+                    "Ask the agent about this commit… (Enter to send, Shift-Enter for a newline)"
+                } else {
+                    "Ask the agent about this PR… (Enter to send, Shift-Enter for a newline)"
+                })
                 .auto_grow(3, 12)
                 .width(None)
                 .on_edit(|s: &mut App| &mut s.composer)
@@ -2495,10 +2752,13 @@ fn checks_dialog(s: &App, k: &Kit, layer: &mut Vec<El>) {
                 })
                 .child(list),
         );
-    let all = s
-        .pr()
-        .map(|p| format!("{}/checks", p.url))
-        .unwrap_or_default();
+    let all = match &s.target {
+        Some(Target::Commit(slug, sha)) => format!("https://github.com/{slug}/commit/{sha}"),
+        _ => s
+            .pr()
+            .map(|p| format!("{}/checks", p.url))
+            .unwrap_or_default(),
+    };
     let open_all = Button::new("Open on GitHub")
         .variant(ButtonVariant::Ghost)
         .disabled(all.is_empty())
@@ -2508,7 +2768,7 @@ fn checks_dialog(s: &App, k: &Kit, layer: &mut Vec<El>) {
         .build(k);
     let refresh = Button::new("Refresh")
         .variant(ButtonVariant::Ghost)
-        .on_press(|s: &mut App| s.reload_comments(Duration::ZERO))
+        .on_press(|s: &mut App| s.reload_detail(Duration::ZERO))
         .build(k);
     let done = Button::new("Done")
         .variant(ButtonVariant::Contrast)
@@ -2971,6 +3231,57 @@ fn main() {
                 s.toast = None;
                 s.confirm = Some(Confirm::InstallApp);
             }),
+            ("commit", |s: &mut App| {
+                demo(s);
+                s.toast = None;
+                let sha = "4f2a9c1e0b7d3a6f5e8c2b1a0d9e8f7a6b5c4d3e".to_string();
+                let summary = CommitSummary {
+                    sha: sha.clone(),
+                    short_sha: "4f2a9c1".into(),
+                    author: "alice".into(),
+                    date: "2026-11-10".into(),
+                    subject: "Add retry jitter to the HTTP client (#42)".into(),
+                };
+                if let Some(r) = s.repos.get_mut("acme/widgets") {
+                    r.default_branch = "main".into();
+                    r.ci.insert(sha.clone(), CheckResult::Fail);
+                    r.commits = vec![summary.clone()];
+                }
+                s.target = Some(Target::Commit("acme/widgets".into(), sha.clone()));
+                s.commit = Some((
+                    summary,
+                    "Spreads retries out so clients don't retry together.".into(),
+                ));
+                s.detail = Some(PrDetail {
+                    checks: vec![Check {
+                        name: "Clippy".into(),
+                        workflow: "CI".into(),
+                        result: CheckResult::Fail,
+                        state: "failure".into(),
+                        url: "https://github.com/acme/widgets/actions/runs/1".into(),
+                        started: String::new(),
+                        completed: String::new(),
+                    }],
+                    head_sha: sha.clone(),
+                    ..PrDetail::default()
+                });
+                s.annotate();
+                s.store
+                    .sessions
+                    .insert(format!("acme/widgets@{sha}"), "ses_ci".into());
+                s.chats.insert(
+                    "ses_ci".into(),
+                    Snapshot {
+                        entries: vec![
+                            Entry::User("Context: …\n\nExplain why CI failed on this commit.".into()),
+                            Entry::Tool { name: "bash".into(), summary: "gh run view 123 --log-failed".into(), status: "completed".into() },
+                            Entry::Text("**Clippy** fails on `src/retry.rs:12`: `jitter` is never read. It's a real lint error, not a flake; the fix is to use it in `next()`.".into()),
+                        ],
+                        running: false,
+                        permissions: Vec::new(),
+                    },
+                );
+            }),
             ("comments", |s: &mut App| {
                 demo(s);
                 s.panel = Panel::Comments;
@@ -3081,5 +3392,42 @@ mod comment_tests {
                 .iter()
                 .any(|c| c.path.is_some() && c.line.is_some())
         );
+    }
+}
+
+#[cfg(test)]
+mod commit_ci_tests {
+    use super::*;
+
+    /// Hits GitHub: `cargo test -- --ignored`. gitsnack's own commits have Actions runs.
+    #[test]
+    #[ignore]
+    fn reads_ci_for_commits() {
+        let slug = "vangheem/gitsnack";
+        let states = gh::branch_ci(slug, "main").unwrap();
+        assert!(!states.is_empty());
+        let (sha, _) = states
+            .iter()
+            .find(|(_, r)| **r == CheckResult::Pass)
+            .unwrap();
+        let checks = gh::commit_checks(slug, sha).unwrap();
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.workflow == "CI" && c.url.starts_with("https://"))
+        );
+        let preamble = commit_preamble(
+            slug,
+            "main",
+            &CommitSummary {
+                sha: sha.clone(),
+                short_sha: sha[..7].into(),
+                author: "a".into(),
+                date: "d".into(),
+                subject: "s".into(),
+            },
+            &checks,
+        );
+        assert!(preamble.starts_with("Context: ") && !preamble.contains("\n\n"));
     }
 }

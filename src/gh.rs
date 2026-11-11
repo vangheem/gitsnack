@@ -306,6 +306,119 @@ pub fn submit_review(
     Ok(())
 }
 
+/// Every check on a commit: Actions jobs (named by their workflow) and commit statuses.
+pub fn commit_checks(slug: &str, sha: &str) -> Result<Vec<Check>> {
+    let json = |path: String| -> Result<Value> {
+        let out = gh(&["api", &path], None)?;
+        Ok(serde_json::from_slice(&out.stdout)?)
+    };
+    let runs = json(format!(
+        "repos/{slug}/actions/runs?head_sha={sha}&per_page=100"
+    ))?;
+    let workflow_of = |suite: u64| {
+        runs["workflow_runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|r| r["check_suite_id"].as_u64() == Some(suite))
+            .and_then(|r| r["name"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let s = |v: &Value, k: &str| v[k].as_str().unwrap_or("").to_string();
+    let mut checks = Vec::new();
+    let check_runs = json(format!(
+        "repos/{slug}/commits/{sha}/check-runs?per_page=100"
+    ))?;
+    for c in check_runs["check_runs"].as_array().into_iter().flatten() {
+        let (status, conclusion) = (s(c, "status"), s(c, "conclusion"));
+        let result = match conclusion.as_str() {
+            "" => CheckResult::Pending,
+            "success" | "neutral" | "skipped" => CheckResult::Pass,
+            _ => CheckResult::Fail,
+        };
+        let state = if conclusion.is_empty() {
+            status
+        } else {
+            conclusion
+        };
+        checks.push(Check {
+            name: s(c, "name"),
+            workflow: c["check_suite"]["id"]
+                .as_u64()
+                .map(workflow_of)
+                .unwrap_or_default(),
+            result,
+            state: state.replace('_', " "),
+            url: s(c, "html_url"),
+            started: s(c, "started_at"),
+            completed: s(c, "completed_at"),
+        });
+    }
+    let status = json(format!("repos/{slug}/commits/{sha}/status"))?;
+    for c in status["statuses"].as_array().into_iter().flatten() {
+        let state = s(c, "state");
+        let result = match state.as_str() {
+            "success" => CheckResult::Pass,
+            "pending" => CheckResult::Pending,
+            _ => CheckResult::Fail,
+        };
+        checks.push(Check {
+            name: s(c, "context"),
+            workflow: String::new(),
+            result,
+            state,
+            url: s(c, "target_url"),
+            started: s(c, "created_at"),
+            completed: String::new(),
+        });
+    }
+    Ok(checks)
+}
+
+/// The combined CI state of the newest commits on `branch`, by full SHA, in one query.
+pub fn branch_ci(
+    slug: &str,
+    branch: &str,
+) -> Result<std::collections::HashMap<String, CheckResult>> {
+    let (owner, name) = slug
+        .split_once('/')
+        .ok_or_else(|| anyhow!("bad repo {slug}"))?;
+    let query = "query($o:String!,$n:String!,$r:String!){repository(owner:$o,name:$n){ref(qualifiedName:$r){target{... on Commit{history(first:100){nodes{oid statusCheckRollup{state}}}}}}}}";
+    let qualified = format!("refs/heads/{branch}");
+    let out = gh(
+        &[
+            "api",
+            "graphql",
+            "-f",
+            &format!("query={query}"),
+            "-f",
+            &format!("o={owner}"),
+            "-f",
+            &format!("n={name}"),
+            "-f",
+            &format!("r={qualified}"),
+        ],
+        None,
+    )?;
+    let v: Value = serde_json::from_slice(&out.stdout)?;
+    let nodes = &v["data"]["repository"]["ref"]["target"]["history"]["nodes"];
+    Ok(nodes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| {
+            let state = n["statusCheckRollup"]["state"].as_str()?;
+            let result = match state {
+                "SUCCESS" => CheckResult::Pass,
+                "PENDING" | "EXPECTED" => CheckResult::Pending,
+                _ => CheckResult::Fail,
+            };
+            Some((n["oid"].as_str()?.to_string(), result))
+        })
+        .collect())
+}
+
 fn flag(v: &Value, name: &str) -> bool {
     v.get(name).and_then(Value::as_bool).unwrap_or(false)
 }

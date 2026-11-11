@@ -92,6 +92,32 @@ pub fn list_commits(dir: &Path, default: &str, limit: usize) -> Result<Vec<Commi
         .collect())
 }
 
+/// One commit's summary and full message body.
+pub fn commit_info(dir: &Path, sha: &str) -> Result<(CommitSummary, String)> {
+    let text = git_ok(
+        dir,
+        &[
+            "show",
+            "-s",
+            "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b",
+            "--date=short",
+            sha,
+        ],
+    )?;
+    let p: Vec<&str> = text.splitn(6, '\u{1f}').collect();
+    if p.len() < 6 {
+        anyhow::bail!("unexpected git show output for {sha}");
+    }
+    let summary = CommitSummary {
+        sha: p[0].into(),
+        short_sha: p[1].into(),
+        author: p[2].into(),
+        date: p[3].into(),
+        subject: p[4].into(),
+    };
+    Ok((summary, p[5].trim().to_string()))
+}
+
 pub fn branch_diff(dir: &Path, default: &str, branch: &str) -> Result<String> {
     range_diff(
         dir,
