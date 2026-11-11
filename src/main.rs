@@ -1487,13 +1487,20 @@ fn toolbar_actions(s: &App, k: &Kit) -> El {
     )
 }
 
-fn review_badge(r: ReviewState) -> &'static str {
-    match r {
-        ReviewState::Approved => "✓",
-        ReviewState::ChangesRequested => "✗",
-        ReviewState::Reviewed => "💬",
-        ReviewState::Unreviewed => "",
-    }
+/// A PR's review state as a small coloured label for the sidebar.
+fn review_status(k: &Kit, r: ReviewState) -> El {
+    let (label, c) = match r {
+        ReviewState::Approved => ("Approved", &k.c.success),
+        ReviewState::ChangesRequested => ("Changes", &k.c.danger),
+        ReviewState::Reviewed => ("Commented", &k.c.info),
+        ReviewState::Unreviewed => ("Needs review", &k.c.warning),
+    };
+    row()
+        .px(6.0)
+        .py(1.0)
+        .radius(4.0)
+        .fill(c.bg)
+        .child(text(label).font(k.ty.text_xsmall_medium).color(c.fg))
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
@@ -1543,10 +1550,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
                 .height(44.0)
                 .selected(s.target.as_ref() == Some(&target))
                 .on_select(move |s: &mut App, tx| s.open(t.clone(), tx));
-            let badge = review_badge(pr.review);
-            if !badge.is_empty() {
-                r = r.badge(badge);
-            }
+            r = r.trailing(review_status(k, pr.review));
             rows.push(r.build(k).key(format!("{slug}/pr/{}", pr.number)));
         }
         for (label, kind) in [("Branches", Browse::Branches), ("Commits", Browse::Commits)] {
