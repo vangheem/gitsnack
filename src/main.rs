@@ -133,6 +133,12 @@ struct App {
 
 const REPO_REFRESH_SECS: f64 = 300.0;
 
+/// The PR description / commit message area: default and largest heights, in points. Dragged
+/// below `DESCRIPTION_COLLAPSE` it hides.
+const DESCRIPTION_DEFAULT: f32 = 180.0;
+const DESCRIPTION_MAX: f32 = 800.0;
+const DESCRIPTION_COLLAPSE: f32 = 24.0;
+
 const PRESETS: &[(&str, &str)] = &[
     (
         "Review",
@@ -488,6 +494,14 @@ impl App {
                 }
             },
         );
+    }
+
+    fn description_height(&self) -> f32 {
+        self.store.description_height.unwrap_or(DESCRIPTION_DEFAULT)
+    }
+
+    fn description_collapsed(&self) -> bool {
+        self.description_height() < DESCRIPTION_COLLAPSE
     }
 
     fn pr_key(&self) -> Option<String> {
@@ -1637,6 +1651,20 @@ fn main_pane(s: &App, k: &Kit) -> El {
     if let (Target::Commit(..), Some((summary, body))) = (target, &s.commit) {
         c = c.child(commit_header(s, k, summary, body));
     }
+    // Between the header and the diff: a divider that resizes the description when there is
+    // one, else a plain rule.
+    let has_body = match target {
+        Target::Pr(..) => s.detail.as_ref().is_some_and(|d| !d.body.trim().is_empty()),
+        Target::Commit(..) => s.commit.as_ref().is_some_and(|c| !c.1.is_empty()),
+        _ => false,
+    };
+    if matches!(target, Target::Pr(..) | Target::Commit(..)) {
+        c = c.child(if has_body {
+            description_divider(k)
+        } else {
+            el().w_full().h(1.0).fill(k.c.border_base)
+        });
+    }
     if let Some(e) = &s.diff_error {
         return c.child(
             text(e.clone())
@@ -1933,6 +1961,39 @@ fn ci_chip(s: &App, k: &Kit) -> Option<El> {
     Some(k.interactive(chip))
 }
 
+/// The bar under a PR description or commit message: drag to resize it (up to collapsing
+/// it), double-click to reset.
+fn description_divider(k: &Kit) -> El {
+    let grip = el().size(48.0, 4.0).radius(2.0).fill(k.c.text_faint);
+    let bar = row()
+        .key("description-divider")
+        .w_full()
+        .h(12.0)
+        .center()
+        .fill(k.c.bg_deep)
+        .border_sides([1.0, 0.0, 1.0, 0.0], k.c.border_strong)
+        .cursor(rune::Cursor::ResizeRow)
+        .role("separator")
+        .label("Resize description")
+        .help("Drag to resize · double-click to reset")
+        .child(grip)
+        .on_drag(
+            |s: &mut App, d: &mut rune::Drag, _: &mut Tx| match d.phase {
+                rune::Phase::Down => {
+                    if d.clicks >= 2 {
+                        s.store.description_height = None;
+                    }
+                    d.data = s.description_height();
+                }
+                rune::Phase::Move => {
+                    s.store.description_height = Some((d.data + d.dy).clamp(0.0, DESCRIPTION_MAX));
+                }
+                rune::Phase::Up => s.save(),
+            },
+        );
+    k.interactive(bar)
+}
+
 fn commit_header(s: &App, k: &Kit, c: &CommitSummary, body: &str) -> El {
     let (adds, dels) = s
         .diff
@@ -1967,7 +2028,6 @@ fn commit_header(s: &App, k: &Kit, c: &CommitSummary, body: &str) -> El {
         .px(16.0)
         .py(12.0)
         .gap(6.0)
-        .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted)
         .child(
             text(c.subject.clone())
                 .font(k.ty.body_medium)
@@ -1975,11 +2035,11 @@ fn commit_header(s: &App, k: &Kit, c: &CommitSummary, body: &str) -> El {
                 .wrap(),
         )
         .child(meta);
-    if !body.is_empty() {
+    if !body.is_empty() && !s.description_collapsed() {
         h = h.child(
             col()
                 .w_full()
-                .max_h(140.0)
+                .max_h(s.description_height())
                 .scroll(ScrollSpec {
                     stick_bottom: false,
                 })
@@ -2045,7 +2105,6 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .px(16.0)
         .py(12.0)
         .gap(6.0)
-        .border_sides([0.0, 0.0, 1.0, 0.0], k.c.border_muted)
         .child(
             text(pr.title.clone())
                 .font(k.ty.body_medium)
@@ -2057,12 +2116,12 @@ fn pr_header(s: &App, k: &Kit, pr: &PullRequest) -> El {
         .detail
         .as_ref()
         .map(|d| d.body.trim())
-        .filter(|b| !b.is_empty())
+        .filter(|b| !b.is_empty() && !s.description_collapsed())
     {
         h = h.child(
             col()
                 .w_full()
-                .max_h(180.0)
+                .max_h(s.description_height())
                 .scroll(ScrollSpec {
                     stick_bottom: false,
                 })
@@ -3259,7 +3318,12 @@ fn demo(s: &mut App) {
         reply: false,
     };
     s.detail = Some(PrDetail {
-        body: "Spreads retries out so clients that failed together don't retry together.".into(),
+        body: "Spreads retries out so clients that failed together don't retry together.\n\n\
+               ## Why\n\nAfter the outage on the 3rd, every client retried on the same schedule and the \
+               API fell over again twice.\n\n## What\n\n- `Backoff` gains a `jitter` field (default 0.2)\n\
+               - `next()` takes a random roll\n- config grows `retry.jitter`\n\n## Testing\n\n\
+               Unit tests cover the bounds; a soak test ran for an hour against staging."
+            .into(),
         checks: [
             (
                 "CICD",

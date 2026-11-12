@@ -29,6 +29,9 @@ pub struct Store {
     /// A release the user chose to skip ("v0.4.0").
     #[serde(default)]
     pub skipped_version: Option<String>,
+    /// How tall the PR description / commit message area is, set by dragging its divider.
+    #[serde(default)]
+    pub description_height: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
