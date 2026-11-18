@@ -32,6 +32,9 @@ pub struct Store {
     /// How tall the PR description / commit message area is, set by dragging its divider.
     #[serde(default)]
     pub description_height: Option<f32>,
+    /// Local working trees opened with `gitsnack diff`, by absolute path.
+    #[serde(default)]
+    pub local_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

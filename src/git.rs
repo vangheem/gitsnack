@@ -1,5 +1,6 @@
-//! Read-only git on gitsnack's managed clones. Everything is relative to `origin/*`, so the
-//! clone's own checkout (which the agent may move around) never affects what is shown.
+//! Read-only git. On gitsnack's managed clones everything is relative to `origin/*`, so the
+//! clone's own checkout (which the agent may move around) never affects what is shown. Local
+//! working trees (`gitsnack diff`) show their uncommitted changes.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -175,15 +176,65 @@ pub fn commit_diff(dir: &Path, sha: &str) -> Result<String> {
     )
 }
 
-fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
+/// The root of the working tree containing `dir`.
+pub fn toplevel(dir: &Path) -> Result<String> {
+    Ok(git_ok(dir, &["rev-parse", "--show-toplevel"])?
+        .trim()
+        .to_string())
+}
+
+/// A working tree's uncommitted changes, staged or not, against HEAD, plus untracked files.
+pub fn local_diff(dir: &Path) -> Result<String> {
+    // An unborn branch has no HEAD: diff against the empty tree instead.
+    let base = if git_ok(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+        "HEAD"
+    } else {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    };
+    let mut patch = git_ok(
+        dir,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            "--find-renames",
+            "-U3",
+            base,
+        ],
+    )?;
+    let untracked = git_ok(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    for path in untracked.split('\0').filter(|p| !p.is_empty()) {
+        // `--no-index` exits 1 when the files differ, which they always do here.
+        let out = git(
+            dir,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--no-index",
+                "--",
+                "/dev/null",
+                path,
+            ],
+        )?;
+        patch.push_str(&String::from_utf8_lossy(&out.stdout));
+    }
+    Ok(patch)
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Ok(Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_PAGER", "cat")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .output()?;
+        .output()?)
+}
+
+fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = git(dir, args)?;
     if !out.status.success() {
         bail!(
             "git {} failed: {}",
@@ -192,4 +243,38 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_diff_includes_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("gitsnack-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_ok(&dir, &["init", "-q"]).unwrap();
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git_ok(&dir, &["add", "a.txt"]).unwrap();
+        git_ok(
+            &dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-qm",
+                "a",
+            ],
+        )
+        .unwrap();
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "new\n").unwrap();
+        let patch = local_diff(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(patch.contains("+two"), "{patch}");
+        assert!(patch.contains("+++ b/b.txt"), "{patch}");
+    }
 }

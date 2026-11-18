@@ -4,6 +4,7 @@
 mod appbundle;
 mod gh;
 mod git;
+mod instance;
 mod model;
 mod opencode;
 mod store;
@@ -46,6 +47,8 @@ enum Target {
     Branch(String, String),
     Commit(String, String),
     Range(String, String, String),
+    /// A local working tree's uncommitted changes, by its root path.
+    Local(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -256,6 +259,7 @@ impl App {
             | Target::Branch(s, _)
             | Target::Commit(s, _)
             | Target::Range(s, _, _) => Some(s.clone()),
+            Target::Local(_) => None,
         }
     }
 
@@ -658,6 +662,7 @@ impl App {
                     Target::Range(slug, a, b) => {
                         (git::range_diff(&store::clone_dir(slug), a, b)?, None, None)
                     }
+                    Target::Local(dir) => (git::local_diff(dir.as_ref())?, None, None),
                 })
             },
             move |s, res, _| {
@@ -688,6 +693,25 @@ impl App {
     fn refresh_target(&mut self, tx: &mut Tx) {
         if let Some(t) = self.target.clone() {
             self.open(t, tx);
+        }
+    }
+
+    /// Shows a local working tree's changes, adding it to the sidebar's Local section.
+    fn open_local(&mut self, dir: String, tx: &mut Tx) {
+        if !self.store.local_dirs.contains(&dir) {
+            self.store.local_dirs.push(dir.clone());
+            self.save();
+        }
+        self.open(Target::Local(dir), tx);
+    }
+
+    fn remove_local(&mut self, dir: &str, tx: &mut Tx) {
+        self.store.local_dirs.retain(|d| d != dir);
+        self.save();
+        if self.target.as_ref() == Some(&Target::Local(dir.to_string())) {
+            self.target = None;
+            self.set_diff(Vec::new());
+            tx.wake_after(Duration::from_millis(1));
         }
     }
 
@@ -1232,6 +1256,23 @@ fn setup(s: &mut App, waker: Waker) {
     {
         s.confirm = Some(Confirm::InstallApp);
     }
+    if rune::tooling::headless_run().is_none() {
+        let (sender, waker) = (s.jobs.0.clone(), s.waker.clone());
+        instance::listen(move |dir| {
+            let _ = sender.send(Box::new(move |s: &mut App, tx: &mut Tx| {
+                s.open_local(dir, tx)
+            }));
+            if let Some(w) = &waker {
+                w();
+            }
+        });
+        if let Some(dir) = std::env::var_os(instance::OPEN_DIFF) {
+            let dir = dir.to_string_lossy().into_owned();
+            let _ = s.jobs.0.send(Box::new(move |s: &mut App, tx: &mut Tx| {
+                s.open_local(dir, tx)
+            }));
+        }
+    }
     s.client();
     for slug in s.store.repos.clone() {
         s.refresh_repo(&slug);
@@ -1377,6 +1418,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
         Some(Target::Range(slug, a, b)) => {
             format!("{slug} · {}…{}", &a[..a.len().min(8)], &b[..b.len().min(8)])
         }
+        Some(Target::Local(dir)) => format!("{} · uncommitted changes", local_name(dir)),
         None => "gitsnack".into(),
     };
     let toolbar = Toolbar::new()
@@ -1537,6 +1579,37 @@ fn sidebar(s: &App, k: &Kit) -> El {
             .build(k)
             .key("add-repo"),
     );
+    if !s.store.local_dirs.is_empty() {
+        let rows = s
+            .store
+            .local_dirs
+            .iter()
+            .map(|dir| {
+                let target = Target::Local(dir.clone());
+                let (open, remove) = (dir.clone(), dir.clone());
+                SidebarRow::new(local_name(dir))
+                    .subtitle(dir.clone())
+                    .height(44.0)
+                    .selected(s.target.as_ref() == Some(&target))
+                    .on_select(move |s: &mut App, tx| s.open_local(open.clone(), tx))
+                    .trailing(
+                        Button::new("Remove")
+                            .variant(ButtonVariant::GhostFaint)
+                            .control_size(ControlSize::Small)
+                            .on_press_tx(move |s: &mut App, tx| s.remove_local(&remove, tx))
+                            .build(k),
+                    )
+                    .build(k)
+                    .key(format!("local/{dir}"))
+            })
+            .collect::<Vec<_>>();
+        sb = sb.section(
+            SidebarSection::new("Local changes")
+                .key("local")
+                .count(s.store.local_dirs.len())
+                .rows(rows),
+        );
+    }
     for (slug, repo) in &s.repos {
         let mut rows = Vec::new();
         if repo.loading && repo.prs.is_empty() {
@@ -1624,6 +1697,11 @@ fn sidebar(s: &App, k: &Kit) -> El {
         );
     }
     sb.build(k)
+}
+
+/// A local working tree's folder name.
+fn local_name(dir: &str) -> &str {
+    dir.rsplit('/').find(|p| !p.is_empty()).unwrap_or(dir)
 }
 
 fn main_pane(s: &App, k: &Kit) -> El {
@@ -3401,7 +3479,8 @@ fn demo(s: &mut App) {
 }
 
 fn main() {
-    if appbundle::cli(&std::env::args().collect::<Vec<_>>()) {
+    let args: Vec<String> = std::env::args().collect();
+    if appbundle::cli(&args) || instance::cli(&args) {
         return;
     }
     // A bare binary has no bundle icon; this gives the Dock and app switcher the logo.
@@ -3428,6 +3507,14 @@ fn main() {
                     }],
                 );
                 s.open_composer(LineRange::line(0, LineRef::new(Side::New, 2)));
+            }),
+            ("local", |s: &mut App| {
+                demo(s);
+                s.toast = None;
+                s.store.local_dirs = vec!["/Users/me/src/widgets".into()];
+                s.target = Some(Target::Local("/Users/me/src/widgets".into()));
+                s.detail = None;
+                s.annotate();
             }),
             ("checks", |s: &mut App| {
                 demo(s);

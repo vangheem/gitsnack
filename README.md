@@ -135,6 +135,11 @@ Linux builds also need `libxkbcommon-dev` and `libwayland-dev`.
 Run `gitsnack`, click **Add repository**, and enter `owner/name`. The first add clones the
 repo, which can take a while for a big one.
 
+To review uncommitted changes in a local checkout, run `gitsnack diff` (or
+`gitsnack diff <path>`) inside it. It opens the working tree's staged, unstaged and untracked
+changes in the running app (starting it if needed) under **Local changes**, apart from the
+tracked repos. ⌘R re-reads them.
+
 | Key | Action |
 | --- | --- |
 | ⌘R | Refresh repos and the open diff |
@@ -150,7 +155,8 @@ repo, which can take a while for a big one.
 Everything gitsnack keeps is under `~/.local/share/gitsnack/` (or `$XDG_DATA_HOME/gitsnack`):
 
 - `state.json`: tracked repos, the opencode session for each PR, viewed files,
-  pending line comments and the chosen model.
+  pending line comments, the chosen model and local working trees opened with `gitsnack diff`.
+- `gitsnack.sock`: where the running app listens for `gitsnack diff`.
 - `repos/<owner>/<name>`: the managed clones.
 
 Removing a repo in the app stops tracking it but leaves its clone in place.
@@ -186,7 +192,8 @@ cargo run -- --list-scenes
 
 - `src/main.rs`: app state, background jobs and all views.
 - `src/gh.rs`: GitHub through `gh` (PRs, diffs, comments, reviews, merging).
-- `src/git.rs`: read-only git on the managed clones.
+- `src/git.rs`: read-only git on the managed clones and local working trees.
+- `src/instance.rs`: `gitsnack diff` and the socket the running app listens on.
 - `src/opencode.rs`: client for opencode's local HTTP API.
 - `src/store.rs`: persisted state.
 - `src/model.rs`: shared types.

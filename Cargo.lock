@@ -1081,6 +1081,7 @@ version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64",
+ "objc2-app-kit 0.2.2",
  "rune",
  "rune-kit",
  "rune-theme-opencode",
