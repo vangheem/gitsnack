@@ -9,9 +9,9 @@ repository = "https://github.com/vangheem/gitsnack"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-rune = { git = "https://github.com/anomalyco/rune", rev = "2a44156b21d63b0342a366b26d9222a6edd4622c" }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "2a44156b21d63b0342a366b26d9222a6edd4622c", features = ["markdown"] }
-rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "2a44156b21d63b0342a366b26d9222a6edd4622c" }
+rune = { git = "https://github.com/vangheem/rune", rev = "ee055d312ad958f937fa715616e336bfabce2f09" }
+rune-kit = { git = "https://github.com/vangheem/rune", rev = "ee055d312ad958f937fa715616e336bfabce2f09", features = ["markdown"] }
+rune-theme-opencode = { git = "https://github.com/vangheem/rune", rev = "ee055d312ad958f937fa715616e336bfabce2f09" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2", features = ["json"] }
