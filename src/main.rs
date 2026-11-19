@@ -49,6 +49,8 @@ enum Target {
     Range(String, String, String),
     /// A local working tree's uncommitted changes, by its root path.
     Local(String),
+    /// A commit in a local working tree: its root path and SHA.
+    LocalCommit(String, String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -132,6 +134,8 @@ struct App {
     /// Comments posted from here that GitHub's reads may not return yet.
     posted: Vec<Comment>,
     next_repo_refresh: Option<f64>,
+    /// Each local working tree's branch commits, by root path.
+    local_commits: HashMap<String, Vec<CommitSummary>>,
 }
 
 const REPO_REFRESH_SECS: f64 = 300.0;
@@ -222,6 +226,7 @@ fn init() -> App {
         next_update_check: 0.0,
         posted: Vec::new(),
         next_repo_refresh: None,
+        local_commits: HashMap::new(),
     }
 }
 
@@ -259,7 +264,7 @@ impl App {
             | Target::Branch(s, _)
             | Target::Commit(s, _)
             | Target::Range(s, _, _) => Some(s.clone()),
-            Target::Local(_) => None,
+            Target::Local(_) | Target::LocalCommit(..) => None,
         }
     }
 
@@ -663,6 +668,11 @@ impl App {
                         (git::range_diff(&store::clone_dir(slug), a, b)?, None, None)
                     }
                     Target::Local(dir) => (git::local_diff(dir.as_ref())?, None, None),
+                    Target::LocalCommit(dir, sha) => (
+                        git::commit_diff(dir.as_ref(), sha)?,
+                        None,
+                        git::commit_info(dir.as_ref(), sha).ok(),
+                    ),
                 })
             },
             move |s, res, _| {
@@ -691,24 +701,51 @@ impl App {
     }
 
     fn refresh_target(&mut self, tx: &mut Tx) {
+        if let Some(dir) = self.local_dir().map(str::to_string) {
+            self.load_local_commits(&dir);
+        }
         if let Some(t) = self.target.clone() {
             self.open(t, tx);
         }
     }
 
-    /// Shows a local working tree's changes, adding it to the sidebar's Local section.
+    /// Shows a local working tree's changes, adding it to the sidebar's Local section, and
+    /// lists its branch's commits.
     fn open_local(&mut self, dir: String, tx: &mut Tx) {
         if !self.store.local_dirs.contains(&dir) {
             self.store.local_dirs.push(dir.clone());
             self.save();
         }
+        self.load_local_commits(&dir);
         self.open(Target::Local(dir), tx);
+    }
+
+    fn load_local_commits(&mut self, dir: &str) {
+        let dir = dir.to_string();
+        self.bg(
+            {
+                let dir = dir.clone();
+                move || git::branch_commits(dir.as_ref()).unwrap_or_default()
+            },
+            move |s, commits, _| {
+                s.local_commits.insert(dir, commits);
+            },
+        );
+    }
+
+    /// The local working tree the open target belongs to.
+    fn local_dir(&self) -> Option<&str> {
+        match self.target.as_ref()? {
+            Target::Local(d) | Target::LocalCommit(d, _) => Some(d),
+            _ => None,
+        }
     }
 
     fn remove_local(&mut self, dir: &str, tx: &mut Tx) {
         self.store.local_dirs.retain(|d| d != dir);
         self.save();
-        if self.target.as_ref() == Some(&Target::Local(dir.to_string())) {
+        self.local_commits.remove(dir);
+        if self.local_dir() == Some(dir) {
             self.target = None;
             self.set_diff(Vec::new());
             tx.wake_after(Duration::from_millis(1));
@@ -1419,6 +1456,9 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
             format!("{slug} · {}…{}", &a[..a.len().min(8)], &b[..b.len().min(8)])
         }
         Some(Target::Local(dir)) => format!("{} · uncommitted changes", local_name(dir)),
+        Some(Target::LocalCommit(dir, sha)) => {
+            format!("{} · {}", local_name(dir), &sha[..sha.len().min(10)])
+        }
         None => "gitsnack".into(),
     };
     let toolbar = Toolbar::new()
@@ -1580,17 +1620,15 @@ fn sidebar(s: &App, k: &Kit) -> El {
             .key("add-repo"),
     );
     if !s.store.local_dirs.is_empty() {
-        let rows = s
-            .store
-            .local_dirs
-            .iter()
-            .map(|dir| {
-                let target = Target::Local(dir.clone());
-                let (open, remove) = (dir.clone(), dir.clone());
+        let mut rows = Vec::new();
+        for dir in &s.store.local_dirs {
+            let (open, remove) = (dir.clone(), dir.clone());
+            let active = s.local_dir() == Some(dir.as_str());
+            rows.push(
                 SidebarRow::new(local_name(dir))
                     .subtitle(dir.clone())
                     .height(44.0)
-                    .selected(s.target.as_ref() == Some(&target))
+                    .selected(!active && s.target.as_ref() == Some(&Target::Local(dir.clone())))
                     .on_select(move |s: &mut App, tx| s.open_local(open.clone(), tx))
                     .trailing(
                         Button::new("Remove")
@@ -1600,9 +1638,37 @@ fn sidebar(s: &App, k: &Kit) -> El {
                             .build(k),
                     )
                     .build(k)
-                    .key(format!("local/{dir}"))
-            })
-            .collect::<Vec<_>>();
+                    .key(format!("local/{dir}")),
+            );
+            if !active {
+                continue;
+            }
+            // The open working tree lists its uncommitted changes and its branch's commits.
+            let open = dir.clone();
+            rows.push(
+                SidebarRow::new("Uncommitted changes")
+                    .depth(1)
+                    .height(30.0)
+                    .selected(s.target.as_ref() == Some(&Target::Local(dir.clone())))
+                    .on_select(move |s: &mut App, tx| s.open(Target::Local(open.clone()), tx))
+                    .build(k)
+                    .key(format!("local/{dir}/uncommitted")),
+            );
+            for c in s.local_commits.get(dir).map_or(&[][..], Vec::as_slice) {
+                let target = Target::LocalCommit(dir.clone(), c.sha.clone());
+                let t = target.clone();
+                rows.push(
+                    SidebarRow::new(c.subject.clone())
+                        .subtitle(format!("{} · {} · {}", c.short_sha, c.author, c.date))
+                        .depth(1)
+                        .height(44.0)
+                        .selected(s.target.as_ref() == Some(&target))
+                        .on_select(move |s: &mut App, tx| s.open(t.clone(), tx))
+                        .build(k)
+                        .key(format!("local/{dir}/{}", c.sha)),
+                );
+            }
+        }
         sb = sb.section(
             SidebarSection::new("Local changes")
                 .key("local")
@@ -1726,17 +1792,24 @@ fn main_pane(s: &App, k: &Kit) -> El {
     {
         c = c.child(pr_header(s, k, pr));
     }
-    if let (Target::Commit(..), Some((summary, body))) = (target, &s.commit) {
+    if let (Target::Commit(..) | Target::LocalCommit(..), Some((summary, body))) =
+        (target, &s.commit)
+    {
         c = c.child(commit_header(s, k, summary, body));
     }
     // Between the header and the diff: a divider that resizes the description when there is
     // one, else a plain rule.
     let has_body = match target {
         Target::Pr(..) => s.detail.as_ref().is_some_and(|d| !d.body.trim().is_empty()),
-        Target::Commit(..) => s.commit.as_ref().is_some_and(|c| !c.1.is_empty()),
+        Target::Commit(..) | Target::LocalCommit(..) => {
+            s.commit.as_ref().is_some_and(|c| !c.1.is_empty())
+        }
         _ => false,
     };
-    if matches!(target, Target::Pr(..) | Target::Commit(..)) {
+    if matches!(
+        target,
+        Target::Pr(..) | Target::Commit(..) | Target::LocalCommit(..)
+    ) {
         c = c.child(if has_body {
             description_divider(k)
         } else {
@@ -2097,9 +2170,11 @@ fn commit_header(s: &App, k: &Kit, c: &CommitSummary, body: &str) -> El {
                 .font(k.ty.small)
                 .color(k.c.text_faint),
         );
-    match ci_chip(s, k) {
-        Some(chip) => meta = meta.child(chip),
-        None => meta = meta.child(text("Loading CI…").font(k.ty.small).color(k.c.text_faint)),
+    if matches!(s.target, Some(Target::Commit(..))) {
+        meta = meta.child(
+            ci_chip(s, k)
+                .unwrap_or_else(|| text("Loading CI…").font(k.ty.small).color(k.c.text_faint)),
+        );
     }
     let mut h = col()
         .w_full()
@@ -3512,6 +3587,16 @@ fn main() {
                 demo(s);
                 s.toast = None;
                 s.store.local_dirs = vec!["/Users/me/src/widgets".into()];
+                s.local_commits.insert(
+                    "/Users/me/src/widgets".into(),
+                    vec![CommitSummary {
+                        sha: "4f2a9c1e0b7d".into(),
+                        short_sha: "4f2a9c1".into(),
+                        author: "alice".into(),
+                        date: "2026-11-10".into(),
+                        subject: "Add retry jitter".into(),
+                    }],
+                );
                 s.target = Some(Target::Local("/Users/me/src/widgets".into()));
                 s.detail = None;
                 s.annotate();

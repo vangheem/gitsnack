@@ -139,7 +139,8 @@ repo, which can take a while for a big one.
 To review uncommitted changes in a local checkout, run `gitsnack diff` (or
 `gitsnack diff <path>`) inside it. It opens the working tree's staged, unstaged and untracked
 changes in the running app (starting it if needed) under **Local changes**, apart from the
-tracked repos. ⌘R re-reads them.
+tracked repos. Below it are the commits on your branch (since it left the default branch, or
+the newest few on the default branch itself), each opening its own diff. ⌘R re-reads them.
 
 | Key | Action |
 | --- | --- |

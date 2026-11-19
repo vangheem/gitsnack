@@ -65,8 +65,33 @@ pub fn list_branches(dir: &Path, default: &str) -> Result<Vec<String>> {
 }
 
 pub fn list_commits(dir: &Path, default: &str, limit: usize) -> Result<Vec<CommitSummary>> {
+    log(dir, &format!("origin/{default}"), limit)
+}
+
+/// A local working tree's commits on its branch: those since it left the default branch, or
+/// its newest few when it hasn't (on the default branch itself, or with no remote).
+pub fn branch_commits(dir: &Path) -> Result<Vec<CommitSummary>> {
+    if git_ok(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    let base = git_ok(
+        dir,
+        &[
+            "merge-base",
+            "HEAD",
+            &format!("origin/{}", default_branch(dir)),
+        ],
+    )
+    .map(|b| b.trim().to_string());
+    let head = git_ok(dir, &["rev-parse", "HEAD"])?.trim().to_string();
+    match base {
+        Ok(base) if base != head => log(dir, &format!("{base}..HEAD"), 200),
+        _ => log(dir, "HEAD", 20),
+    }
+}
+
+fn log(dir: &Path, rev: &str, limit: usize) -> Result<Vec<CommitSummary>> {
     let n = limit.clamp(1, 500).to_string();
-    let rev = format!("origin/{default}");
     let text = git_ok(
         dir,
         &[
@@ -75,7 +100,7 @@ pub fn list_commits(dir: &Path, default: &str, limit: usize) -> Result<Vec<Commi
             &n,
             "--pretty=format:%H%x1f%h%x1f%an%x1f%ad%x1f%s",
             "--date=short",
-            &rev,
+            rev,
         ],
     )?;
     Ok(text
@@ -273,7 +298,10 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "two\n").unwrap();
         std::fs::write(dir.join("b.txt"), "new\n").unwrap();
         let patch = local_diff(&dir).unwrap();
+        let commits = branch_commits(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "a");
         assert!(patch.contains("+two"), "{patch}");
         assert!(patch.contains("+++ b/b.txt"), "{patch}");
     }
