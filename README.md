@@ -12,8 +12,7 @@
 
 A native desktop app for reviewing GitHub pull requests, with an
 [opencode](https://opencode.ai) agent built into each review. It's built with
-[Rune](https://github.com/anomalyco/rune), a GPU-rendered Rust UI framework. It builds against
-[a fork](https://github.com/vangheem/rune/tree/gitsnack) (branch `gitsnack`) that carries fixes not yet upstream.
+[Rune](https://github.com/anomalyco/rune), a GPU-rendered Rust UI framework.
 
 Instead of opening GitHub to find what needs your review, then opening a terminal and asking
 an agent about the PR, gitsnack puts both in one window: the PR list, the diff, the
